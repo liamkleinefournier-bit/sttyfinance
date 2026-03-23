@@ -1,8 +1,8 @@
+
 import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
-import os
 from datetime import datetime
 from collections import defaultdict
 import plotly.graph_objects as go
@@ -17,16 +17,19 @@ st.markdown("""
 <style>
     .stApp { background-color: #0a0e17; color: #e8eaf0; }
     section[data-testid="stSidebar"] { background-color: #0f1623; border-right: 1px solid #1e2535; }
-    .metric-card { background: linear-gradient(135deg, #141b2d, #1a2340); border: 1px solid #1e2d4a; border-radius: 10px; padding: 18px 22px; margin: 5px 0; }
-    .metric-label { font-size: 0.7rem; color: #6b7fa3; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; }
-    .metric-value { font-size: 2rem; font-weight: 800; color: #e8eaf0; margin-top: 6px; line-height: 1; }
+    .metric-card { background: linear-gradient(135deg, #141b2d, #1a2340); border: 1px solid #1e2d4a; border-radius: 10px; padding: 14px 18px; margin: 4px 0; }
+    .metric-label { font-size: 0.65rem; color: #6b7fa3; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; }
+    .metric-value { font-size: 1.6rem; font-weight: 800; color: #e8eaf0; margin-top: 4px; line-height: 1; }
     .metric-value.positive { color: #00e5b3; }
     .metric-value.negative { color: #ff5555; }
     .stButton > button { background: linear-gradient(135deg, #e63946, #c1121f); color: white; border: none; border-radius: 8px; font-weight: 700; width: 100%; padding: 12px; font-size: 1rem; }
     .stButton > button:hover { opacity: 0.85; }
     div[data-testid="stExpander"] { background: #0f1623; border-radius: 8px; border: 1px solid #1e2535; }
     .info-banner { background: #0d1e3a; border-left: 4px solid #3a7bd5; padding: 12px 18px; border-radius: 6px; margin-bottom: 18px; font-size: 0.9rem; color: #a8bedf; }
-    .section-header { font-size: 1.3rem; font-weight: 700; color: #e8eaf0; margin: 28px 0 14px 0; padding-bottom: 10px; border-bottom: 2px solid #1e2d4a; }
+    .section-header { font-size: 1.2rem; font-weight: 700; color: #e8eaf0; margin: 20px 0 10px 0; padding-bottom: 8px; border-bottom: 2px solid #1e2d4a; }
+    .strat-header-1 { color: #00e5b3; font-weight: 700; font-size: 1rem; }
+    .strat-header-2 { color: #4a90d9; font-weight: 700; font-size: 1rem; }
+    .strat-header-3 { color: #f5a623; font-weight: 700; font-size: 1rem; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -69,15 +72,13 @@ def get_universe(choice):
 
 
 # ─────────────────────────────────────────────
-# DATA — yfinance
+# DATA
 # ─────────────────────────────────────────────
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_data(tickers, start_date, end_date):
     try:
-        raw = yf.download(
-            tickers, start=start_date, end=end_date,
-            auto_adjust=True, progress=False, threads=True
-        )
+        raw = yf.download(tickers, start=start_date, end=end_date,
+                          auto_adjust=True, progress=False, threads=True)
         if raw.empty:
             return {}
         if len(tickers) == 1:
@@ -105,21 +106,26 @@ def fetch_etf(ticker, start_date, end_date):
 
 # ─────────────────────────────────────────────
 # BACKTEST ENGINE
+# strategy_mode:
+#   "atr"     — trailing stop ratchets up every bar from highest candle body high
+#   "mtp"     — static stop, only moves up when pyramid add fires
+#   "10bar"   — static stop, only updates every N bars AND only if new high made
 # ─────────────────────────────────────────────
-def run_backtest(data, tickers, params, initial_capital, progress_bar=None):
-    bp  = params["breakout_period"]
-    ap  = params["atr_period"]
-    am  = params["atr_mult"]
-    ms  = params["min_spacing"]
-    ma  = params["max_age"]
-    mp  = params["max_pyramid"]
-    s2  = params["sma200"]
-    s5  = params["sma50"]
-    vmp = params["vol_ma_period"]
-    vsm = params["vol_spike_mult"]
-    mav = params["min_avg_vol"]
-    brp = params["base_risk_pct"]
-    mnp = params["min_price"]
+def run_backtest(data, tickers, params, initial_capital, strategy_mode="atr", progress_bar=None):
+    bp     = params["breakout_period"]
+    ap     = params["atr_period"]
+    am     = params["atr_mult"]
+    ms     = params["min_spacing"]
+    ma     = params["max_age"]
+    mp     = params["max_pyramid"]
+    s2     = params["sma200"]
+    s5     = params["sma50"]
+    vmp    = params["vol_ma_period"]
+    vsm    = params["vol_spike_mult"]
+    mav    = params["min_avg_vol"]
+    brp    = params["base_risk_pct"]
+    mnp    = params["min_price"]
+    rev    = params.get("stop_review_bars", 10)  # for 10-bar mode
 
     raw   = []
     close = data.get("Close", pd.DataFrame())
@@ -147,18 +153,25 @@ def run_backtest(data, tickers, params, initial_capital, progress_bar=None):
             sma200 = c.rolling(s2).mean()
             sma50  = c.rolling(s5).mean()
             volma  = vol.rolling(vmp).mean()
-            cbh    = pd.concat([o, c], axis=1).max(axis=1)
-            hb52   = cbh.rolling(bp).max()
+
+            # Strategy 1 uses candle body high for breakout
+            if strategy_mode == "atr":
+                cbh  = pd.concat([o, c], axis=1).max(axis=1)
+                hb52 = cbh.rolling(bp).max()
+            else:
+                hb52 = h.rolling(bp).max()
 
             in_t  = False
             slvl  = entry = hbh = hba = np.nan
             age   = bsa = pyc = 0
-            ed    = None
+            bsr   = 0    # bars since review (10-bar mode)
+            high_since_review = np.nan
 
             for j in range(mb, len(c)):
                 cv  = c.iloc[j]
                 lv  = lo.iloc[j]
-                cb  = cbh.iloc[j]
+                hv  = h.iloc[j]
+                cb  = cbh.iloc[j] if strategy_mode == "atr" else hv
                 hb  = hb52.iloc[j]
                 av  = atr.iloc[j]
                 v2  = sma200.iloc[j]
@@ -170,26 +183,31 @@ def run_backtest(data, tickers, params, initial_capital, progress_bar=None):
                 if pd.isna(hb) or pd.isna(av) or pd.isna(v2):
                     continue
 
-                sd   = am * av
-                ok   = vm >= mav
-                vs   = vl >= vm * vsm
-                a2   = cv > v2
-                a5   = cv > v5
-                px   = cv >= mnp
+                sd  = am * av
+                ok  = vm >= mav
+                vs  = vl >= vm * vsm
+                a2  = cv > v2
+                a5  = cv > v5
+                px  = cv >= mnp
 
-                esig = cb >= hb and a2 and a5 and not in_t and vs and ok and px
-                asig = in_t and a2 and cb > hba and bsa >= ms and age < ma and vl > vm and pyc < mp
+                # Entry condition
+                if strategy_mode == "atr":
+                    esig = cb >= hb and a2 and a5 and not in_t and vs and ok and px
+                else:
+                    esig = hv == hb and a2 and not in_t and vs and ok and px
+
+                asig = in_t and a2 and hv > hba and bsa >= ms and age < ma and vl > vm and pyc < mp
                 sh   = in_t and lv < slvl
                 te   = in_t and age >= ma
 
                 if esig:
                     in_t  = True
                     entry = cv
+                    slvl  = cv - sd
                     hbh   = cb
-                    slvl  = cb - sd
-                    hba   = cb
-                    age   = bsa = pyc = 0
-                    ed    = dt
+                    hba   = hv
+                    age   = bsa = pyc = bsr = 0
+                    high_since_review = hv
                     raw.append({
                         "ticker": ticker, "entry_date": dt,
                         "entry_price": cv, "stop_dist": sd,
@@ -198,6 +216,7 @@ def run_backtest(data, tickers, params, initial_capital, progress_bar=None):
                         "exit_type": None, "pyramid_adds": 0,
                         "trade_age": 0, "_qty": 0, "_eq": 0.0
                     })
+
                 elif sh or te:
                     xp = slvl if sh else cv
                     xt = "Stop" if sh else "TimeExit"
@@ -211,16 +230,62 @@ def run_backtest(data, tickers, params, initial_capital, progress_bar=None):
                             break
                     in_t  = False
                     slvl  = entry = hbh = hba = np.nan
-                    age   = bsa = pyc = 0
+                    age   = bsa = pyc = bsr = 0
+                    high_since_review = np.nan
+
                 elif in_t:
                     age += 1; bsa += 1
-                    if cb > hbh: hbh = cb
-                    ns = hbh - sd
-                    if ns > slvl: slvl = ns
-                    if asig:
-                        hba = cb; bsa = 0; pyc += 1
-                    elif cb > hba:
-                        hba = cb
+
+                    if strategy_mode == "atr":
+                        # Trailing: ratchet stop up every bar from highest body high
+                        if cb > hbh:
+                            hbh = cb
+                        ns = hbh - sd
+                        if ns > slvl:
+                            slvl = ns
+                        if asig:
+                            hba = hv; bsa = 0; pyc += 1
+                        elif hv > hba:
+                            hba = hv
+
+                    elif strategy_mode == "mtp":
+                        # Static: stop only moves on pyramid add
+                        if asig:
+                            slvl = cv - sd
+                            hba  = hv
+                            bsa  = 0
+                            pyc += 1
+                        elif hv > hba:
+                            hba = hv
+
+                    elif strategy_mode == "10bar":
+                        # 10-bar: stop only updates every N bars AND only if new high made
+                        bsr += 1
+                        if hv > high_since_review:
+                            high_since_review = hv
+
+                        add_fired = False
+                        if asig:
+                            slvl             = cv - sd
+                            hba              = hv
+                            bsa              = 0
+                            pyc             += 1
+                            bsr              = 0
+                            high_since_review = hv
+                            add_fired        = True
+
+                        if not add_fired and bsr >= rev:
+                            # Only update if new high was made during review window
+                            if high_since_review > (slvl + sd):
+                                ns = high_since_review - sd
+                                if ns > slvl:
+                                    slvl = ns
+                            bsr = 0
+                            high_since_review = hv
+
+                        if not asig and hv > hba:
+                            hba = hv
+
         except Exception:
             continue
 
@@ -228,6 +293,7 @@ def run_backtest(data, tickers, params, initial_capital, progress_bar=None):
     if not raw:
         return pd.DataFrame()
 
+    # Pass 2 — portfolio simulation with 2:1 leverage
     LEVERAGE = 2.0
     raw.sort(key=lambda x: (x["entry_date"], -x.get("rel_vol", 0)))
     eq     = float(initial_capital)
@@ -375,6 +441,82 @@ def add_monthly(equity, monthly):
 
 
 # ─────────────────────────────────────────────
+# CHARTS
+# ─────────────────────────────────────────────
+COLORS = {
+    "atr":   "#00e5b3",
+    "mtp":   "#4a90d9",
+    "10bar": "#f5a623",
+    "qqq":   "#a855f7",
+    "spy":   "#6b7fa3",
+}
+
+def chart_comparison(results, qqq=None, spy=None, monthly=0):
+    """Multi-strategy equity curve comparison."""
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                        row_heights=[0.72, 0.28], vertical_spacing=0.03)
+
+    names = {"atr": "S1: ATR Trailing", "mtp": "S2: MTP Static", "10bar": "S3: 10-Bar Static"}
+
+    for mode, (equity, dd) in results.items():
+        strat = add_monthly(equity, monthly)
+        fig.add_trace(go.Scatter(x=strat.index, y=strat.values,
+            line=dict(color=COLORS[mode], width=2), name=names[mode]), row=1, col=1)
+        fig.add_trace(go.Scatter(x=dd.index, y=dd.values*100,
+            line=dict(color=COLORS[mode], width=1, dash="dot"),
+            name=f"{names[mode]} DD", showlegend=False), row=2, col=1)
+
+    if qqq is not None:
+        fig.add_trace(go.Scatter(x=qqq.index, y=qqq.values,
+            line=dict(color=COLORS["qqq"], width=1.5, dash="dash"), name="QQQ DCA"), row=1, col=1)
+    if spy is not None:
+        fig.add_trace(go.Scatter(x=spy.index, y=spy.values,
+            line=dict(color=COLORS["spy"], width=1.5, dash="dot"), name="SPY DCA"), row=1, col=1)
+
+    fig.update_layout(paper_bgcolor="#0a0e17", plot_bgcolor="#0a0e17",
+        font=dict(color="#e8eaf0"), margin=dict(l=0,r=0,t=10,b=0), height=480,
+        showlegend=True, legend=dict(bgcolor="rgba(10,14,23,0.9)",
+                                     bordercolor="#1e2d4a", borderwidth=1, x=0.01, y=0.99))
+    fig.update_xaxes(gridcolor="#141b2d")
+    fig.update_yaxes(gridcolor="#141b2d")
+    fig.update_yaxes(title_text="Portfolio ($)", row=1, col=1)
+    fig.update_yaxes(title_text="Drawdown (%)", row=2, col=1)
+    return fig
+
+def chart_annual(equity, color, name):
+    ann    = equity.resample("YE").last().pct_change().dropna() * 100
+    colors = [color if v >= 0 else "#ff5555" for v in ann.values]
+    fig    = go.Figure(go.Bar(x=ann.index.year, y=ann.values, marker_color=colors, name=name))
+    fig.update_layout(paper_bgcolor="#0a0e17", plot_bgcolor="#0a0e17",
+        font=dict(color="#e8eaf0"), margin=dict(l=0,r=0,t=10,b=0), height=280,
+        xaxis_title="Year", yaxis_title="Return (%)", title=name,
+        title_font=dict(color=color))
+    fig.update_xaxes(gridcolor="#141b2d")
+    fig.update_yaxes(gridcolor="#141b2d", zeroline=True, zerolinecolor="#2a3550")
+    return fig
+
+def chart_dist(df, color, name):
+    if df.empty:
+        return go.Figure()
+    fig = px.histogram(df, x="pnl_pct", nbins=60,
+        color_discrete_sequence=[color], labels={"pnl_pct": "Trade Return (%)"}, title=name)
+    fig.update_layout(paper_bgcolor="#0a0e17", plot_bgcolor="#0a0e17",
+        font=dict(color="#e8eaf0"), margin=dict(l=0,r=0,t=30,b=0), height=280,
+        title_font=dict(color=color))
+    fig.update_xaxes(gridcolor="#141b2d")
+    fig.update_yaxes(gridcolor="#141b2d")
+    return fig
+
+def mc(label, value, pos_good=True, color=None):
+    neg = isinstance(value, str) and value.startswith("-")
+    if color:
+        css = f"style='color:{color}'"
+        return f'<div class="metric-card"><div class="metric-label">{label}</div><div class="metric-value" {css}>{value}</div></div>'
+    css = ("negative" if pos_good else "positive") if neg else ("positive" if pos_good else "negative")
+    return f'<div class="metric-card"><div class="metric-label">{label}</div><div class="metric-value {css}">{value}</div></div>'
+
+
+# ─────────────────────────────────────────────
 # OPTIMIZER
 # ─────────────────────────────────────────────
 def suggest(space, past, n_start=10):
@@ -404,73 +546,13 @@ def suggest(space, past, n_start=10):
 
 
 # ─────────────────────────────────────────────
-# CHARTS
-# ─────────────────────────────────────────────
-def chart_equity(equity, dd, qqq=None, spy=None, monthly=0):
-    fig   = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.72, 0.28], vertical_spacing=0.03)
-    strat = add_monthly(equity, monthly)
-    fig.add_trace(go.Scatter(x=strat.index, y=strat.values, fill="tozeroy",
-        fillcolor="rgba(0,229,179,0.08)", line=dict(color="#00e5b3", width=2.5), name="Strategy"), row=1, col=1)
-    if qqq is not None:
-        fig.add_trace(go.Scatter(x=qqq.index, y=qqq.values,
-            line=dict(color="#4a90d9", width=1.5, dash="dot"), name="QQQ DCA"), row=1, col=1)
-    if spy is not None:
-        fig.add_trace(go.Scatter(x=spy.index, y=spy.values,
-            line=dict(color="#f5a623", width=1.5, dash="dash"), name="SPY DCA"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=dd.index, y=dd.values*100, fill="tozeroy",
-        fillcolor="rgba(255,85,85,0.25)", line=dict(color="#ff5555", width=1), name="Drawdown %"), row=2, col=1)
-    fig.update_layout(paper_bgcolor="#0a0e17", plot_bgcolor="#0a0e17",
-        font=dict(color="#e8eaf0"), margin=dict(l=0,r=0,t=10,b=0), height=460,
-        showlegend=True, legend=dict(bgcolor="rgba(10,14,23,0.9)", bordercolor="#1e2d4a", borderwidth=1, x=0.01, y=0.99))
-    fig.update_xaxes(gridcolor="#141b2d")
-    fig.update_yaxes(gridcolor="#141b2d")
-    fig.update_yaxes(title_text="Portfolio ($)", row=1, col=1)
-    fig.update_yaxes(title_text="Drawdown (%)", row=2, col=1)
-    return fig
-
-def chart_annual(equity):
-    ann    = equity.resample("YE").last().pct_change().dropna() * 100
-    colors = ["#00e5b3" if v >= 0 else "#ff5555" for v in ann.values]
-    fig    = go.Figure(go.Bar(x=ann.index.year, y=ann.values, marker_color=colors))
-    fig.update_layout(paper_bgcolor="#0a0e17", plot_bgcolor="#0a0e17",
-        font=dict(color="#e8eaf0"), margin=dict(l=0,r=0,t=10,b=0), height=320,
-        xaxis_title="Year", yaxis_title="Return (%)")
-    fig.update_xaxes(gridcolor="#141b2d")
-    fig.update_yaxes(gridcolor="#141b2d", zeroline=True, zerolinecolor="#2a3550")
-    return fig
-
-def chart_dist(df):
-    fig = px.histogram(df, x="pnl_pct", nbins=60, color_discrete_sequence=["#3a7bd5"],
-        labels={"pnl_pct": "Trade Return (%)"})
-    fig.update_layout(paper_bgcolor="#0a0e17", plot_bgcolor="#0a0e17",
-        font=dict(color="#e8eaf0"), margin=dict(l=0,r=0,t=10,b=0), height=320)
-    fig.update_xaxes(gridcolor="#141b2d")
-    fig.update_yaxes(gridcolor="#141b2d")
-    return fig
-
-def chart_scatter(df, col):
-    fig = px.scatter(df, x="trial", y=col, hover_data=df.columns.tolist(),
-        color=col, color_continuous_scale="RdYlGn")
-    fig.update_layout(paper_bgcolor="#0a0e17", plot_bgcolor="#0a0e17",
-        font=dict(color="#e8eaf0"), margin=dict(l=0,r=0,t=10,b=0), height=350)
-    fig.update_xaxes(gridcolor="#141b2d", title="Trial #")
-    fig.update_yaxes(gridcolor="#141b2d")
-    return fig
-
-def mc(label, value, pos_good=True):
-    neg = isinstance(value, str) and value.startswith("-")
-    css = ("negative" if pos_good else "positive") if neg else ("positive" if pos_good else "negative")
-    return f'<div class="metric-card"><div class="metric-label">{label}</div><div class="metric-value {css}">{value}</div></div>'
-
-
-# ─────────────────────────────────────────────
 # SIDEBAR
 # ─────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## ⚙️ Settings")
 
     with st.expander("📊 Universe & Data", expanded=True):
-        universe = st.selectbox("Exchange", ["Nasdaq + NYSE", "Nasdaq", "NYSE", "Custom"])
+        universe = st.selectbox("Exchange", ["Nasdaq + NYSE","Nasdaq","NYSE","Custom"])
         custom_tickers = []
         if universe == "Custom":
             raw_input = st.text_area("Tickers (comma-separated)", "AAPL, MSFT, NVDA")
@@ -483,82 +565,97 @@ with st.sidebar:
         initial_capital      = st.number_input("Capital ($)", min_value=1000, value=10000, step=1000)
         monthly_contribution = st.number_input("Monthly Add ($)", min_value=0, value=500, step=100)
 
-    with st.expander("🎯 Strategy", expanded=True):
-        breakout_period = st.number_input("52W Lookback", 10, 504, 220)
-        atr_period      = st.number_input("ATR Period", 1, 500, 125)
-        atr_mult        = st.number_input("ATR Multiplier", 0.1, 20.0, 7.0, step=0.05)
+    with st.expander("🔀 Strategy Selection", expanded=True):
+        st.caption("Choose which strategies to run and compare.")
+        run_s1 = st.toggle("S1 — ATR Trailing Stop", value=True)
+        run_s2 = st.toggle("S2 — MTP Static Stop",   value=True)
+        run_s3 = st.toggle("S3 — 10-Bar Static Stop", value=True)
+        show_qqq = st.toggle("Show QQQ benchmark", value=True)
+        show_spy = st.toggle("Show SPY benchmark", value=True)
+
+    with st.expander("🎯 Strategy Parameters", expanded=True):
+        st.caption("All active strategies use the same parameters.")
+        breakout_period = st.number_input("52W Lookback", 10, 504, 252)
+        atr_period      = st.number_input("ATR Period", 1, 500, 293)
+        atr_mult        = st.number_input("ATR Multiplier", 0.1, 20.0, 7.25, step=0.05)
         max_pyramid     = st.number_input("Max Pyramid Adds", 0, 20, 5)
-        min_spacing     = st.number_input("Min Bars Between Adds", 1, 100, 19)
-        max_age         = st.number_input("Max Trade Age (bars)", 10, 2000, 550)
-        base_risk_pct   = st.number_input("Risk % per Trade", 0.1, 10.0, 2.75, step=0.25)
+        min_spacing     = st.number_input("Min Bars Between Adds", 1, 100, 38)
+        max_age         = st.number_input("Max Trade Age (bars)", 10, 2000, 584)
+        base_risk_pct   = st.number_input("Risk % per Trade", 0.1, 10.0, 2.0, step=0.25)
+        stop_review_bars = st.number_input("Stop Review Interval (S3 only)", 1, 50, 10)
 
     with st.expander("📈 Moving Averages", expanded=True):
         sma200 = st.number_input("Trend SMA Period", 1, 500, 200)
-        sma50  = st.number_input("Context SMA Period", 1, 300, 70)
-        st.caption("Entry only when price is above both SMAs.")
+        sma50  = st.number_input("Context SMA Period", 1, 300, 50)
 
     with st.expander("🔊 Volume"):
         vol_ma_period  = st.number_input("Volume MA Period", 5, 100, 20)
-        vol_spike_mult = st.number_input("Volume Spike Multiplier", 1.0, 5.0, 1.4, step=0.1)
+        vol_spike_mult = st.number_input("Volume Spike Multiplier", 1.0, 5.0, 1.5, step=0.1)
         min_avg_vol    = st.number_input("Min Avg Volume", 0, 10_000_000, 1_000_000, step=100_000)
 
     with st.expander("🔍 Price"):
         min_price = st.number_input("Min Price ($)", 0.0, 500.0, 10.0, step=0.5)
 
     st.markdown("---")
-    run_btn = st.button("🚀 Run Backtest")
+    run_btn = st.button("🚀 Run Comparison")
 
 
 # ─────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────
-st.markdown("# 📈 Stock Trend Trader")
-st.markdown("*52W Body Breakout · ATR Trailing Stop · Compounding · Nasdaq + NYSE*")
+st.markdown("# 📈 Stock Trend Trader — Strategy Comparison")
+st.markdown("*Compare ATR Trailing · MTP Static · 10-Bar Static · vs QQQ & SPY benchmarks*")
 st.markdown("---")
 
-tab1, tab2 = st.tabs(["📊 Backtest", "🔬 Optimization"])
+main_tab1, main_tab2 = st.tabs(["📊 Strategy Comparison", "🔬 Optimization"])
 
 
-# ══════════════════════
-# TAB 1 — BACKTEST
-# ══════════════════════
-with tab1:
+# ══════════════════════════════════════════
+# TAB 1 — COMPARISON
+# ══════════════════════════════════════════
+with main_tab1:
     if not run_btn:
         st.markdown("""<div class="info-banner">
-        Configure parameters in the sidebar and click <strong>Run Backtest</strong>.<br>
-        Data is pulled live from Yahoo Finance. Defaults are set to your optimized median settings.
+        Toggle which strategies to run in the sidebar, then click <strong>Run Comparison</strong>.<br>
+        All active strategies run with identical parameters so results are directly comparable.
         </div>""", unsafe_allow_html=True)
+
         c1, c2, c3 = st.columns(3)
         with c1:
-            st.markdown("""**Strategy:**
-- 52W candle body breakout
-- Above both SMAs
-- Volume spike confirmation
-- ATR trailing stop
-- Pyramid adds on new highs
-- 2:1 leverage, compounding""")
+            st.markdown("""**S1 — ATR Trailing Stop** 🟢
+Stop ratchets up every bar from the highest candle body high since entry. Most responsive to new highs.""")
         with c2:
-            st.markdown("""**Metrics:**
-- CAGR — yearly return
-- Sharpe — return / risk
-- Calmar — CAGR / max DD
-- Profit Factor — wins / losses
-- Expectancy — avg per trade""")
+            st.markdown("""**S2 — MTP Static Stop** 🔵
+Stop is completely frozen between pyramid adds. Only resets to close − ATR when an add fires.""")
         with c3:
-            st.markdown("""**Median settings:**
-- 52W: 220 | ATR: 125 / 7.0x
-- Max Pyramid: 5 | Spacing: 19
-- SMA: 200 / 70
-- Vol Spike: 1.4x | Risk: 2.75%""")
+            st.markdown("""**S3 — 10-Bar Static Stop** 🟠
+Stop reviews every N bars. Only updates if a new high was made during that window. Most stable.""")
+
     else:
+        active = []
+        if run_s1: active.append("atr")
+        if run_s2: active.append("mtp")
+        if run_s3: active.append("10bar")
+
+        if not active:
+            st.error("Select at least one strategy.")
+            st.stop()
+
         params = {
-            "breakout_period": breakout_period, "atr_period": atr_period,
-            "atr_mult": atr_mult, "min_spacing": min_spacing,
-            "max_age": max_age, "max_pyramid": max_pyramid,
-            "sma200": sma200, "sma50": sma50,
-            "vol_ma_period": vol_ma_period, "vol_spike_mult": vol_spike_mult,
-            "min_avg_vol": min_avg_vol, "base_risk_pct": base_risk_pct,
-            "min_price": min_price,
+            "breakout_period":  breakout_period,
+            "atr_period":       atr_period,
+            "atr_mult":         atr_mult,
+            "min_spacing":      min_spacing,
+            "max_age":          max_age,
+            "max_pyramid":      max_pyramid,
+            "sma200":           sma200,
+            "sma50":            sma50,
+            "vol_ma_period":    vol_ma_period,
+            "vol_spike_mult":   vol_spike_mult,
+            "min_avg_vol":      min_avg_vol,
+            "base_risk_pct":    base_risk_pct,
+            "min_price":        min_price,
+            "stop_review_bars": stop_review_bars,
         }
 
         tickers = custom_tickers if universe == "Custom" else get_universe(universe)
@@ -566,119 +663,141 @@ with tab1:
             st.error("No tickers loaded.")
             st.stop()
 
-        st.info(f"Universe: **{len(tickers)} tickers** | Period: **{start_date}** to **{end_date}**")
+        st.info(f"Universe: **{len(tickers)} tickers** | Running: **{len(active)} strategies** | {start_date} to {end_date}")
 
-        with st.spinner(f"Downloading data for {len(tickers)} tickers from Yahoo Finance..."):
+        with st.spinner(f"Downloading data for {len(tickers)} tickers..."):
             data = fetch_data(tuple(tickers), str(start_date), str(end_date))
 
         if not data:
-            st.error("No data returned from Yahoo Finance.")
+            st.error("No data returned.")
             st.stop()
 
-        prog   = st.progress(0, text="Running backtest...")
-        trades = run_backtest(data, tickers, params, initial_capital, prog)
-        prog.empty()
+        mode_names = {"atr": "S1: ATR Trailing", "mtp": "S2: MTP Static", "10bar": "S3: 10-Bar Static"}
+        mode_colors = {"atr": COLORS["atr"], "mtp": COLORS["mtp"], "10bar": COLORS["10bar"]}
 
-        if trades.empty:
-            st.warning("No trades generated. Try a longer date range or looser filters.")
+        all_results  = {}  # mode -> (equity, drawdown)
+        all_metrics  = {}  # mode -> metrics dict
+        all_trades   = {}  # mode -> trades df
+
+        for mode in active:
+            with st.spinner(f"Running {mode_names[mode]}..."):
+                prog   = st.progress(0, text=f"Scanning tickers for {mode_names[mode]}...")
+                trades = run_backtest(data, tickers, params, initial_capital, mode, prog)
+                prog.empty()
+
+            if trades.empty:
+                st.warning(f"{mode_names[mode]}: No trades generated.")
+                continue
+
+            metrics, equity, drawdown = compute_metrics(trades, initial_capital, start_date, end_date)
+            all_results[mode]  = (equity, drawdown)
+            all_metrics[mode]  = metrics
+            all_trades[mode]   = trades
+
+        if not all_results:
+            st.warning("No results generated for any strategy.")
             st.stop()
 
-        metrics, equity, drawdown = compute_metrics(trades, initial_capital, start_date, end_date)
+        # Load benchmarks
+        qqq_eq = spy_eq = None
+        if show_qqq:
+            with st.spinner("Loading QQQ..."):
+                qqq_eq = compute_dca("QQQ", initial_capital, monthly_contribution, start_date, end_date)
+        if show_spy:
+            with st.spinner("Loading SPY..."):
+                spy_eq = compute_dca("SPY", initial_capital, monthly_contribution, start_date, end_date)
 
-        st.markdown('<div class="section-header">📊 Performance Overview</div>', unsafe_allow_html=True)
+        # ── Combined equity curve ──
+        st.markdown('<div class="section-header">📈 Equity Curve Comparison</div>', unsafe_allow_html=True)
+        st.plotly_chart(chart_comparison(all_results, qqq_eq, spy_eq, monthly_contribution),
+                        use_container_width=True)
 
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            st.markdown(mc("CAGR", metrics["CAGR"]), unsafe_allow_html=True)
-            st.markdown(mc("Total Return", metrics["Total Return"]), unsafe_allow_html=True)
-        with c2:
-            st.markdown(mc("Sharpe", metrics["Sharpe"]), unsafe_allow_html=True)
-            st.markdown(mc("Calmar", metrics["Calmar"]), unsafe_allow_html=True)
-        with c3:
-            st.markdown(mc("Max Drawdown", metrics["Max Drawdown"], False), unsafe_allow_html=True)
-            st.markdown(mc("Sortino", metrics["Sortino"]), unsafe_allow_html=True)
-        with c4:
-            st.markdown(mc("Total Trades", str(metrics["Total Trades"])), unsafe_allow_html=True)
-            st.markdown(mc("Profit Factor", metrics["Profit Factor"]), unsafe_allow_html=True)
+        # ── Final value summary ──
+        n_months = (pd.to_datetime(end_date) - pd.to_datetime(start_date)).days / 30.44
+        total_in = initial_capital + monthly_contribution * n_months
+        st.caption(f"Total contributed: **${total_in:,.0f}** (${initial_capital:,} initial + ${monthly_contribution:,}/month)")
 
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            st.markdown(mc("Win Rate", metrics["Win Rate"]), unsafe_allow_html=True)
-        with c2:
-            st.markdown(mc("Avg Win", metrics["Avg Win"]), unsafe_allow_html=True)
-        with c3:
-            st.markdown(mc("Avg Loss", metrics["Avg Loss"], False), unsafe_allow_html=True)
-        with c4:
-            st.markdown(mc("Expectancy", metrics["Expectancy"]), unsafe_allow_html=True)
+        all_cols = list(all_results.keys())
+        if show_qqq and qqq_eq is not None: all_cols.append("qqq")
+        if show_spy and spy_eq is not None: all_cols.append("spy")
 
-        st.markdown("---")
-        t1, t2, t3, t4 = st.tabs(["📈 Equity Curve", "📅 Annual Returns", "📦 Distribution", "📋 Trade Log"])
+        cols = st.columns(len(all_cols))
+        for i, key in enumerate(all_cols):
+            with cols[i]:
+                if key == "qqq":
+                    final = qqq_eq.iloc[-1]
+                    st.markdown(mc("QQQ Final Value", f"${final:,.0f}", color=COLORS["qqq"]), unsafe_allow_html=True)
+                elif key == "spy":
+                    final = spy_eq.iloc[-1]
+                    st.markdown(mc("SPY Final Value", f"${final:,.0f}", color=COLORS["spy"]), unsafe_allow_html=True)
+                else:
+                    equity = all_results[key][0]
+                    final  = add_monthly(equity, monthly_contribution).iloc[-1]
+                    st.markdown(mc(f"{mode_names[key]} Final", f"${final:,.0f}",
+                                   color=mode_colors[key]), unsafe_allow_html=True)
 
-        with t1:
-            with st.spinner("Loading QQQ and SPY benchmarks..."):
-                qqq = compute_dca("QQQ", initial_capital, monthly_contribution, start_date, end_date)
-                spy = compute_dca("SPY", initial_capital, monthly_contribution, start_date, end_date)
-            st.plotly_chart(chart_equity(equity, drawdown, qqq, spy, monthly_contribution), use_container_width=True)
-            n_months = (pd.to_datetime(end_date) - pd.to_datetime(start_date)).days / 30.44
-            total_in = initial_capital + monthly_contribution * n_months
-            bc1, bc2, bc3 = st.columns(3)
-            strat_final = add_monthly(equity, monthly_contribution).iloc[-1]
-            with bc1:
-                st.markdown(mc("Strategy Final", f"${strat_final:,.0f}"), unsafe_allow_html=True)
-            with bc2:
-                st.markdown(mc("QQQ Final", f"${qqq.iloc[-1]:,.0f}" if qqq is not None else "No data"), unsafe_allow_html=True)
-            with bc3:
-                st.markdown(mc("SPY Final", f"${spy.iloc[-1]:,.0f}" if spy is not None else "No data"), unsafe_allow_html=True)
-            st.caption(f"Total contributed: **${total_in:,.0f}** (${initial_capital:,} initial + ${monthly_contribution:,}/month)")
+        # ── Side by side metrics ──
+        st.markdown('<div class="section-header">📊 Performance Metrics</div>', unsafe_allow_html=True)
 
-        with t2:
-            st.plotly_chart(chart_annual(equity), use_container_width=True)
-            ann = equity.resample("YE").last().pct_change().dropna()
-            c1, c2, c3 = st.columns(3)
-            with c1: st.markdown(mc("Winning Years", str((ann > 0).sum())), unsafe_allow_html=True)
-            with c2: st.markdown(mc("Losing Years",  str((ann <= 0).sum()), False), unsafe_allow_html=True)
-            with c3: st.markdown(mc("Avg Year", f"{ann.mean()*100:.2f}%"), unsafe_allow_html=True)
+        metric_keys = ["CAGR","Sharpe","Calmar","Max Drawdown","Total Trades","Win Rate","Profit Factor","Expectancy"]
+        pos_good    = [True, True, True, False, True, True, True, True]
 
-        with t3:
-            st.plotly_chart(chart_dist(trades), use_container_width=True)
+        cols = st.columns(len(all_results))
+        for i, (mode, metrics) in enumerate(all_metrics.items()):
+            with cols[i]:
+                st.markdown(f'<div style="color:{mode_colors[mode]};font-weight:700;font-size:1rem;margin-bottom:8px">{mode_names[mode]}</div>',
+                            unsafe_allow_html=True)
+                for mk, pg in zip(metric_keys, pos_good):
+                    st.markdown(mc(mk, metrics[mk], pg), unsafe_allow_html=True)
 
-        with t4:
-            cols = ["ticker","entry_date","exit_date","entry_price","exit_price",
-                    "pnl_pct","pnl_dollar","exit_type","pyramid_adds","trade_age","equity_at_entry"]
-            ddf = trades[cols].copy()
-            for c in ["pnl_pct","pnl_dollar","entry_price","exit_price"]:
-                ddf[c] = ddf[c].round(2)
-            st.dataframe(ddf, use_container_width=True, height=420)
-            st.download_button("⬇️ Download Trade Log", ddf.to_csv(index=False), "trades.csv", "text/csv")
+        # ── Annual returns ──
+        st.markdown('<div class="section-header">📅 Annual Returns</div>', unsafe_allow_html=True)
+        cols = st.columns(len(all_results))
+        for i, (mode, (equity, _)) in enumerate(all_results.items()):
+            with cols[i]:
+                st.plotly_chart(chart_annual(equity, mode_colors[mode], mode_names[mode]),
+                                use_container_width=True)
 
-        st.markdown("---")
-        st.markdown('<div class="section-header">⚙️ Parameters This Run</div>', unsafe_allow_html=True)
-        st.dataframe(pd.DataFrame([{
-            "52W": breakout_period, "ATR Per": atr_period, "ATR Mult": atr_mult,
-            "MaxPyr": max_pyramid, "MinSpace": min_spacing, "MaxAge": max_age,
-            "Risk%": base_risk_pct, "SMA Trend": sma200, "SMA Context": sma50,
-            "VolSpike": vol_spike_mult, "CAGR": metrics["CAGR"],
-            "Sharpe": metrics["Sharpe"], "Calmar": metrics["Calmar"],
-            "MaxDD": metrics["Max Drawdown"], "PF": metrics["Profit Factor"],
-        }]), use_container_width=True)
+        # ── Trade distribution ──
+        st.markdown('<div class="section-header">📦 Trade Distribution</div>', unsafe_allow_html=True)
+        cols = st.columns(len(all_results))
+        for i, (mode, trades) in enumerate(all_trades.items()):
+            with cols[i]:
+                st.plotly_chart(chart_dist(trades, mode_colors[mode], mode_names[mode]),
+                                use_container_width=True)
+
+        # ── Trade logs ──
+        st.markdown('<div class="section-header">📋 Trade Logs</div>', unsafe_allow_html=True)
+        trade_tabs = st.tabs([mode_names[m] for m in all_trades.keys()])
+        for tab, (mode, trades) in zip(trade_tabs, all_trades.items()):
+            with tab:
+                dcols = ["ticker","entry_date","exit_date","entry_price","exit_price",
+                         "pnl_pct","pnl_dollar","exit_type","pyramid_adds","trade_age","equity_at_entry"]
+                ddf = trades[dcols].copy()
+                for c in ["pnl_pct","pnl_dollar","entry_price","exit_price"]:
+                    ddf[c] = ddf[c].round(2)
+                st.dataframe(ddf, use_container_width=True, height=350)
+                st.download_button(f"⬇️ Download {mode_names[mode]}",
+                    ddf.to_csv(index=False), f"trades_{mode}.csv", "text/csv")
 
 
-# ══════════════════════
+# ══════════════════════════════════════════
 # TAB 2 — OPTIMIZATION
-# ══════════════════════
-with tab2:
+# ══════════════════════════════════════════
+with main_tab2:
     st.markdown("### 🔬 Parameter Optimization")
     st.markdown("""<div class="info-banner">
-    Set search ranges. The optimizer uses Bayesian-style directed search.
-    Every trial is shown in the table. Run multiple times with different metrics then find your middle ground manually.
+    Optimize parameters for a chosen strategy. Run multiple times with different metrics,
+    then find your middle ground manually.
     </div>""", unsafe_allow_html=True)
 
-    oc1, oc2 = st.columns(2)
-    with oc1: opt_metric = st.selectbox("Optimize For", ["Calmar","Sharpe","CAGR","Profit Factor"])
-    with oc2: n_trials   = st.number_input("Trials", 5, 200, 30, step=5)
+    oc1, oc2, oc3 = st.columns(3)
+    with oc1: opt_metric   = st.selectbox("Optimize For", ["Calmar","Sharpe","CAGR","Profit Factor"])
+    with oc2: opt_strategy = st.selectbox("Strategy to Optimize", ["S1: ATR Trailing","S2: MTP Static","S3: 10-Bar Static"])
+    with oc3: n_trials     = st.number_input("Trials", 5, 200, 30, step=5)
 
     opt_universe = st.selectbox("Universe", ["Nasdaq + NYSE","Nasdaq","NYSE","Custom"], key="ou")
-    custom_opt   = []
+    custom_opt = []
     if opt_universe == "Custom":
         ci = st.text_area("Tickers", "AAPL, MSFT, NVDA", key="ct")
         custom_opt = [t.strip().upper() for t in ci.split(",") if t.strip()]
@@ -686,26 +805,29 @@ with tab2:
     st.markdown("#### Search Ranges")
     sr1, sr2 = st.columns(2)
     with sr1:
-        bp_r = st.slider("52W Lookback",         50,   504,  (150, 320), step=10)
-        ap_r = st.slider("ATR Period",            10,   400,  (80,  200), step=5)
+        bp_r = st.slider("52W Lookback",         50,   504,  (150, 350), step=10)
+        ap_r = st.slider("ATR Period",            10,   400,  (150, 350), step=5)
         am_r = st.slider("ATR Multiplier",        2.0,  15.0, (5.0, 10.0), step=0.5)
         mp_r = st.slider("Max Pyramid Adds",      0,    15,   (2, 8),    step=1)
-        ms_r = st.slider("Min Bars Between Adds", 5,    60,   (10, 25),  step=1)
-        ma_r = st.slider("Max Trade Age",         100,  2000, (300, 800), step=50)
+        ms_r = st.slider("Min Bars Between Adds", 5,    80,   (20, 50),  step=1)
+        ma_r = st.slider("Max Trade Age",         100,  2000, (400, 800), step=50)
     with sr2:
         s2_r = st.slider("Trend SMA Period",      100,  300,  (150, 250), step=10)
-        s5_r = st.slider("Context SMA Period",    20,   100,  (40, 80),  step=5)
-        vs_r = st.slider("Vol Spike Multiplier",  1.0,  3.0,  (1.1, 2.0), step=0.1)
+        s5_r = st.slider("Context SMA Period",    20,   100,  (40, 70),  step=5)
+        vs_r = st.slider("Vol Spike Multiplier",  1.0,  3.0,  (1.2, 2.0), step=0.1)
         br_r = st.slider("Base Risk %",           0.5,  5.0,  (1.0, 3.5), step=0.25)
 
-    oc3, oc4, oc5 = st.columns(3)
-    with oc3: opt_start = st.date_input("Start", datetime(2005, 1, 1), key="os")
-    with oc4: opt_end   = st.date_input("End",   datetime.today(),     key="oe")
-    with oc5: opt_cap   = st.number_input("Capital ($)", 1000, 10000000, 10000, step=1000, key="oc")
+    oc4, oc5, oc6 = st.columns(3)
+    with oc4: opt_start = st.date_input("Start", datetime(2005, 1, 1), key="os")
+    with oc5: opt_end   = st.date_input("End",   datetime.today(),     key="oe")
+    with oc6: opt_cap   = st.number_input("Capital ($)", 1000, 10000000, 10000, step=1000, key="oc")
 
     run_opt = st.button("🚀 Run Optimization")
 
     if run_opt:
+        opt_mode_map = {"S1: ATR Trailing": "atr", "S2: MTP Static": "mtp", "S3: 10-Bar Static": "10bar"}
+        opt_mode = opt_mode_map[opt_strategy]
+
         opt_tickers = custom_opt if opt_universe == "Custom" else get_universe(opt_universe)
         if not opt_tickers:
             st.error("No tickers.")
@@ -728,7 +850,12 @@ with tab2:
             "vol_spike_mult":  (vs_r[0], vs_r[1], 0.1,  "float"),
             "base_risk_pct":   (br_r[0], br_r[1], 0.25, "float"),
         }
-        fixed = {"vol_ma_period": vol_ma_period, "min_avg_vol": min_avg_vol, "min_price": min_price}
+        fixed = {
+            "vol_ma_period":    vol_ma_period,
+            "min_avg_vol":      min_avg_vol,
+            "min_price":        min_price,
+            "stop_review_bars": stop_review_bars,
+        }
 
         with st.spinner(f"Downloading data for {len(opt_tickers)} tickers..."):
             opt_data = fetch_data(tuple(opt_tickers), str(opt_start), str(opt_end))
@@ -748,7 +875,7 @@ with tab2:
             prog.progress(n/n_trials, text=f"Trial {n}/{n_trials} | Best {opt_metric}: {best_s:.4f}")
             tp  = suggest(space, past)
             fp  = {**tp, **fixed}
-            tdf = run_backtest(opt_data, opt_tickers, fp, opt_cap)
+            tdf = run_backtest(opt_data, opt_tickers, fp, opt_cap, opt_mode)
 
             if tdf.empty:
                 score = -999.0
@@ -781,7 +908,7 @@ with tab2:
         st.markdown(f"---\n### ✅ Done — Best {opt_metric}: **{best_s:.4f}**")
 
         if best_t:
-            st.markdown("#### 🏆 Best Trial")
+            st.markdown(f"#### 🏆 Best Trial — {opt_strategy}")
             bc1, bc2, bc3, bc4 = st.columns(4)
             with bc1:
                 st.markdown(mc("CAGR",   f"{best_t['CAGR%']}%"), unsafe_allow_html=True)
@@ -800,8 +927,8 @@ with tab2:
         final.index += 1
         st.markdown("#### All Trials")
         st.dataframe(final, use_container_width=True, height=500)
-        st.plotly_chart(chart_scatter(pd.DataFrame(results), scol), use_container_width=True)
         st.download_button("⬇️ Download Results",
             final.to_csv(index=False),
-            f"opt_{opt_metric.lower().replace(' ','_')}.csv", "text/csv")
+            f"opt_{opt_strategy.replace(':','').replace(' ','_').lower()}_{opt_metric.lower()}.csv",
+            "text/csv")
         st.caption("💡 Run again with a different target metric. Compare tables and pick your middle ground.")
