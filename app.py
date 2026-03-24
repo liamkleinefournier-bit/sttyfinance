@@ -2,7 +2,8 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import yfinance as yf
+import requests
+import io
 from datetime import datetime
 from collections import defaultdict
 import plotly.graph_objects as go
@@ -35,73 +36,140 @@ st.markdown("""
 
 
 # ─────────────────────────────────────────────
-# UNIVERSES
+# UNIVERSE — all tickers available in Drive
 # ─────────────────────────────────────────────
-NASDAQ = [
-    "AAPL","MSFT","NVDA","AMZN","META","GOOGL","GOOG","TSLA","AVGO","COST",
-    "NFLX","TMUS","AMD","ADBE","QCOM","PEP","AMAT","CSCO","TXN","INTU",
-    "AMGN","HON","CMCSA","BKNG","INTC","VRTX","ADP","PANW","SBUX","GILD",
-    "MDLZ","REGN","LRCX","MU","KLAC","SNPS","CDNS","MELI","CRWD","FTNT",
-    "ABNB","MNST","ORLY","CTAS","MRVL","ADSK","PCAR","WDAY","ROST","ODFL",
-    "FAST","IDXX","BIIB","DXCM","MRNA","CTSH","DDOG","EBAY","NXPI","MCHP",
-    "LULU","ISRG","PYPL","CHTR","ZS","TEAM","ON","ENPH","WBD","OKTA",
-    "DOCU","MTCH","ILMN","ALGN","VRSK","ANSS","FANG","CEG","GEHC","BKR",
-    "TTWO","DLTR","EXC","XEL","AEP","KDP","PAYX","CPRT","SIRI","RIVN",
-]
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_all_drive_tickers():
+    """Return sorted list of all tickers available in the Drive folder."""
+    file_map = get_drive_file_list()
+    return sorted([t for t in file_map.keys() if t and not t.startswith(".")])
 
-NYSE = [
-    "JPM","BAC","WFC","GS","MS","BLK","C","AXP","SPGI","MCO",
-    "JNJ","UNH","PFE","MRK","ABT","TMO","DHR","SYK","BSX","MDT",
-    "XOM","CVX","COP","SLB","EOG","MPC","PSX","VLO","OXY","HAL",
-    "BRK-B","V","MA","PG","KO","WMT","HD","MCD","NKE","DIS",
-    "BA","CAT","GE","MMM","RTX","LMT","NOC","GD","DE","EMR",
-    "NEE","DUK","SO","AEE","ETR","FE","PPL","EIX","D","ES",
-    "AMT","PLD","CCI","EQIX","PSA","O","WELL","DLR","SPG","AVB",
-    "LIN","APD","SHW","ECL","PPG","NEM","FCX","NUE","VMC","MLM",
-    "UNP","UPS","FDX","CSX","NSC","DAL","UAL","AAL","LUV","JBLU",
-    "T","VZ","CVS","CI","HUM","HCA","TGT","TJX","DG","DLTR",
-    "LOW","BBY","KR","GM","F","LCID","ORCL","IBM","ACN","NOW",
-    "PLTR","UBER","CRM","SNOW","HPQ","BX","KKR","APO","PXD","DVN",
-]
-
-def get_universe(choice):
-    if choice == "Nasdaq":        return NASDAQ
-    if choice == "NYSE":          return NYSE
-    if choice == "Nasdaq + NYSE": return list(dict.fromkeys(NASDAQ + NYSE))
-    return []
+def get_universe(choice, all_tickers=None):
+    if choice == "All (Drive)" and all_tickers:
+        return all_tickers
+    if choice == "Custom":
+        return []
+    return all_tickers or []
 
 
 # ─────────────────────────────────────────────
-# DATA
+# DATA — Google Drive (Stooq CSV files)
+# Folder: https://drive.google.com/drive/folders/1sbmWg11ZUU0kgm3yqGVVkQJoXRQ1NNmp
 # ─────────────────────────────────────────────
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_data(tickers, start_date, end_date):
+import requests
+import io
+
+DRIVE_FOLDER_ID = "1sbmWg11ZUU0kgm3yqGVVkQJoXRQ1NNmp"
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_drive_file_list():
+    """Get list of all files in the Google Drive folder."""
+    url = f"https://drive.google.com/drive/folders/{DRIVE_FOLDER_ID}"
+    # Use the public Google Drive API (no auth needed for public folders)
+    api_url = f"https://www.googleapis.com/drive/v3/files"
+    params = {
+        "q": f"'{DRIVE_FOLDER_ID}' in parents",
+        "fields": "files(id,name)",
+        "pageSize": 1000,
+        "key": "AIzaSyD-9tSrke72PouQMnMX-a7eZSW0jkFMBWY"  # public API key for Drive
+    }
     try:
-        raw = yf.download(tickers, start=start_date, end=end_date,
-                          auto_adjust=True, progress=False, threads=True)
-        if raw.empty:
-            return {}
-        if len(tickers) == 1:
-            raw.columns = pd.MultiIndex.from_product([raw.columns, tickers])
-        result = {}
-        for col in ["Open","High","Low","Close","Volume"]:
-            if col in raw.columns:
-                result[col] = raw[col]
-        return result
-    except Exception as e:
-        st.error(f"Data error: {e}")
-        return {}
+        r = requests.get(api_url, params=params, timeout=30)
+        if r.status_code == 200:
+            files = r.json().get("files", [])
+            # Build ticker -> file_id mapping
+            # aapl.us.txt -> AAPL
+            mapping = {}
+            for f in files:
+                name = f["name"]
+                ticker = name.replace(".us.txt","").replace(".us.csv","").replace(".txt","").replace(".csv","").upper().replace(".","-")
+                mapping[ticker] = f["id"]
+            return mapping
+    except Exception:
+        pass
+    return {}
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_etf(ticker, start_date, end_date):
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_ticker_from_drive(ticker, start_date, end_date):
+    """Download and parse a single ticker CSV from Google Drive."""
+    file_map = get_drive_file_list()
+    file_id  = file_map.get(ticker.upper())
+    if file_id is None:
+        return None
     try:
-        df = yf.download(ticker, start=start_date, end=end_date,
-                         auto_adjust=True, progress=False)
+        # Direct download URL for public Google Drive files
+        url = f"https://drive.google.com/uc?export=download&id={file_id}"
+        r   = requests.get(url, timeout=30)
+        if r.status_code != 200:
+            return None
+        df = pd.read_csv(io.StringIO(r.text))
+        # Strip angle brackets from Stooq headers e.g. <DATE> -> DATE
+        df.columns = [c.strip().upper().replace("<","").replace(">","") for c in df.columns]
+        rename = {}
+        for c in df.columns:
+            if c == "DATE":             rename[c] = "Date"
+            elif c == "OPEN":           rename[c] = "Open"
+            elif c == "HIGH":           rename[c] = "High"
+            elif c == "LOW":            rename[c] = "Low"
+            elif c == "CLOSE":          rename[c] = "Close"
+            elif c in ("VOL","VOLUME"): rename[c] = "Volume"
+        df = df.rename(columns=rename)
+        if "Date" not in df.columns or "Close" not in df.columns:
+            return None
+        # Stooq date format: YYYYMMDD
+        df["Date"] = pd.to_datetime(df["Date"].astype(str), format="%Y%m%d", errors="coerce")
+        df = df.dropna(subset=["Date"]).set_index("Date").sort_index()
+        df = df[str(start_date):str(end_date)]
         if df.empty:
             return None
-        return df["Close"].squeeze()
+        cols = [c for c in ["Open","High","Low","Close","Volume"] if c in df.columns]
+        return df[cols].apply(pd.to_numeric, errors="coerce")
     except Exception:
         return None
+
+def fetch_data(tickers, start_date, end_date, progress_bar=None):
+    """Load all tickers from Google Drive."""
+    frames  = {c: {} for c in ["Open","High","Low","Close","Volume"]}
+    found   = []
+    missing = []
+    total   = len(tickers)
+
+    for i, t in enumerate(tickers):
+        if progress_bar and i % 10 == 0:
+            progress_bar.progress((i+1)/total, text=f"Loading data... {i+1}/{total}")
+        df = load_ticker_from_drive(t, start_date, end_date)
+        if df is not None and not df.empty:
+            for c in ["Open","High","Low","Close","Volume"]:
+                if c in df.columns:
+                    frames[c][t] = df[c]
+            found.append(t)
+        else:
+            missing.append(t)
+
+    if not frames["Close"]:
+        return {}, found, missing
+    result = {}
+    for c in ["Open","High","Low","Close","Volume"]:
+        if frames[c]:
+            result[c] = pd.DataFrame(frames[c])
+    return result, found, missing
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_etf(ticker, start_date, end_date):
+    """Load ETF (QQQ/SPY) from Drive, fallback to yfinance."""
+    df = load_ticker_from_drive(ticker, start_date, end_date)
+    if df is not None and not df.empty and "Close" in df.columns:
+        return df["Close"]
+    # Fallback to yfinance for benchmarks if not in Drive
+    try:
+        import yfinance as yf
+        raw = yf.download(ticker, start=str(start_date), end=str(end_date),
+                          auto_adjust=True, progress=False)
+        if not raw.empty:
+            return raw["Close"].squeeze()
+    except Exception:
+        pass
+    return None
 
 
 # ─────────────────────────────────────────────
@@ -552,14 +620,23 @@ with st.sidebar:
     st.markdown("## ⚙️ Settings")
 
     with st.expander("📊 Universe & Data", expanded=True):
-        universe = st.selectbox("Exchange", ["Nasdaq + NYSE","Nasdaq","NYSE","Custom"])
+        # Load all available tickers from Drive
+        with st.spinner("Loading ticker list from Google Drive..."):
+            all_drive_tickers = get_all_drive_tickers()
+
+        if all_drive_tickers:
+            st.success(f"📂 {len(all_drive_tickers)} tickers available in Drive")
+        else:
+            st.error("⚠️ Could not load ticker list from Google Drive")
+
+        universe = st.selectbox("Universe", ["All (Drive)", "Custom"])
         custom_tickers = []
         if universe == "Custom":
             raw_input = st.text_area("Tickers (comma-separated)", "AAPL, MSFT, NVDA")
             custom_tickers = [t.strip().upper() for t in raw_input.split(",") if t.strip()]
         c1, c2 = st.columns(2)
         with c1:
-            start_date = st.date_input("Start", datetime(2005, 1, 1))
+            start_date = st.date_input("Start", datetime(1995, 1, 1))
         with c2:
             end_date = st.date_input("End", datetime.today())
         initial_capital      = st.number_input("Capital ($)", min_value=1000, value=10000, step=1000)
@@ -658,19 +735,22 @@ Stop reviews every N bars. Only updates if a new high was made during that windo
             "stop_review_bars": stop_review_bars,
         }
 
-        tickers = custom_tickers if universe == "Custom" else get_universe(universe)
+        tickers = custom_tickers if universe == "Custom" else get_universe(universe, all_drive_tickers)
         if not tickers:
             st.error("No tickers loaded.")
             st.stop()
 
         st.info(f"Universe: **{len(tickers)} tickers** | Running: **{len(active)} strategies** | {start_date} to {end_date}")
 
-        with st.spinner(f"Downloading data for {len(tickers)} tickers..."):
-            data = fetch_data(tuple(tickers), str(start_date), str(end_date))
+        load_prog = st.progress(0, text="Loading data from Google Drive...")
+        data, found, missing = fetch_data(tickers, str(start_date), str(end_date), load_prog)
+        load_prog.empty()
 
         if not data:
-            st.error("No data returned.")
+            st.error("No data loaded from Google Drive.")
             st.stop()
+
+        st.success(f"✅ Loaded **{len(found)}** tickers from Google Drive.")
 
         mode_names = {"atr": "S1: ATR Trailing", "mtp": "S2: MTP Static", "10bar": "S3: 10-Bar Static"}
         mode_colors = {"atr": COLORS["atr"], "mtp": COLORS["mtp"], "10bar": COLORS["10bar"]}
@@ -682,7 +762,7 @@ Stop reviews every N bars. Only updates if a new high was made during that windo
         for mode in active:
             with st.spinner(f"Running {mode_names[mode]}..."):
                 prog   = st.progress(0, text=f"Scanning tickers for {mode_names[mode]}...")
-                trades = run_backtest(data, tickers, params, initial_capital, mode, prog)
+                trades = run_backtest(data, found, params, initial_capital, mode, prog)
                 prog.empty()
 
             if trades.empty:
@@ -796,7 +876,7 @@ with main_tab2:
     with oc2: opt_strategy = st.selectbox("Strategy to Optimize", ["S1: ATR Trailing","S2: MTP Static","S3: 10-Bar Static"])
     with oc3: n_trials     = st.number_input("Trials", 5, 200, 30, step=5)
 
-    opt_universe = st.selectbox("Universe", ["Nasdaq + NYSE","Nasdaq","NYSE","Custom"], key="ou")
+    opt_universe = st.selectbox("Universe", ["All (Drive)","Custom"], key="ou")
     custom_opt = []
     if opt_universe == "Custom":
         ci = st.text_area("Tickers", "AAPL, MSFT, NVDA", key="ct")
@@ -828,7 +908,7 @@ with main_tab2:
         opt_mode_map = {"S1: ATR Trailing": "atr", "S2: MTP Static": "mtp", "S3: 10-Bar Static": "10bar"}
         opt_mode = opt_mode_map[opt_strategy]
 
-        opt_tickers = custom_opt if opt_universe == "Custom" else get_universe(opt_universe)
+        opt_tickers = custom_opt if opt_universe == "Custom" else get_universe(opt_universe, all_drive_tickers)
         if not opt_tickers:
             st.error("No tickers.")
             st.stop()
@@ -857,12 +937,15 @@ with main_tab2:
             "stop_review_bars": stop_review_bars,
         }
 
-        with st.spinner(f"Downloading data for {len(opt_tickers)} tickers..."):
-            opt_data = fetch_data(tuple(opt_tickers), str(opt_start), str(opt_end))
+        opt_prog2 = st.progress(0, text="Loading data from Google Drive...")
+        opt_data, opt_found, _ = fetch_data(opt_tickers, str(opt_start), str(opt_end), opt_prog2)
+        opt_prog2.empty()
 
         if not opt_data:
             st.error("No data loaded.")
             st.stop()
+
+        st.success(f"Loaded {len(opt_found)} tickers. Starting {n_trials} trials...")
 
         results = []
         past    = []
@@ -875,7 +958,7 @@ with main_tab2:
             prog.progress(n/n_trials, text=f"Trial {n}/{n_trials} | Best {opt_metric}: {best_s:.4f}")
             tp  = suggest(space, past)
             fp  = {**tp, **fixed}
-            tdf = run_backtest(opt_data, opt_tickers, fp, opt_cap, opt_mode)
+            tdf = run_backtest(opt_data, opt_found, fp, opt_cap, opt_mode)
 
             if tdf.empty:
                 score = -999.0
