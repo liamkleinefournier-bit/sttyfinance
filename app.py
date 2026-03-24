@@ -11,9 +11,9 @@ from plotly.subplots import make_subplots
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import warnings
 warnings.filterwarnings("ignore")
- 
+
 st.set_page_config(page_title="Stock Trend Trader", layout="wide", initial_sidebar_state="expanded")
- 
+
 st.markdown("""
 <style>
     .stApp { background-color: #0a0e17; color: #e8eaf0; }
@@ -30,8 +30,8 @@ st.markdown("""
     .section-header { font-size: 1.2rem; font-weight: 700; color: #e8eaf0; margin: 20px 0 10px 0; padding-bottom: 8px; border-bottom: 2px solid #1e2d4a; }
 </style>
 """, unsafe_allow_html=True)
- 
- 
+
+
 # ─────────────────────────────────────────────
 # STOOQ DATA LAYER
 # Direct connection to stooq.com — no API key
@@ -42,12 +42,12 @@ st.markdown("""
 # from S&P 500, S&P 400, S&P 600, Russell 1000, Russell 2000,
 # Nasdaq 100, and broader exchange constituents.
 # ─────────────────────────────────────────────
- 
+
 STOOQ_BASE      = "https://stooq.com/q/d/l/"
 HEADERS         = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 MAX_WORKERS     = 30
 REQUEST_TIMEOUT = 20
- 
+
 # ── Complete NYSE + Nasdaq common stock universe ──
 # S&P 500 + S&P 400 MidCap + S&P 600 SmallCap + Russell extensions
 _UNIVERSE = (
@@ -301,8 +301,8 @@ _UNIVERSE = (
     "YMAB,YNDX,YOTA,YRCW,YTEN,YY,ZEAL,ZEUS,ZFOX,ZGNX,"
     "ZIMV,ZLAB,ZNTH,ZNTL,ZSAN,ZUUS,ZVIA,ZVRA,ZYME,ZYXI"
 )
- 
- 
+
+
 def get_stooq_ticker_list() -> list[str]:
     """
     Returns the full embedded NYSE + Nasdaq common stock universe.
@@ -312,14 +312,14 @@ def get_stooq_ticker_list() -> list[str]:
     raw   = set(t.strip() for t in _UNIVERSE.replace("\n", "").split(",") if t.strip())
     clean = {t for t in raw if 1 <= len(t) <= 5 and t.isalpha()}
     return sorted(clean)
- 
- 
+
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_single_ticker_stooq(ticker: str, start_date: str, end_date: str) -> pd.DataFrame | None:
     """
     Download OHLCV from Stooq for a single ticker.
     URL format: https://stooq.com/q/d/l/?s=AAPL.US&d1=19950101&d2=20251231&i=d
- 
+
     Stooq symbol rules:
       - Standard ticker:  AAPL  → aapl.us
       - BRK-B style:      BRK-B → brk-b.us  (Stooq accepts the hyphen)
@@ -331,43 +331,43 @@ def fetch_single_ticker_stooq(ticker: str, start_date: str, end_date: str) -> pd
         symbol = f"{ticker.lower()}.us"
         url    = f"{STOOQ_BASE}?s={symbol}&d1={s}&d2={e}&i=d"
         r      = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
- 
+
         if r.status_code != 200:
             return None
- 
+
         text = r.text.strip()
         if len(text) < 30:
             return None
- 
+
         # Stooq returns these strings for bad/rate-limited tickers
         bad_signals = ("No data", "Exceeded the daily", "<!DOCTYPE", "<html", "error")
         if any(sig.lower() in text.lower() for sig in bad_signals):
             return None
- 
+
         df = pd.read_csv(io.StringIO(text))
         if df.empty:
             return None
- 
+
         df.columns = [c.strip().title() for c in df.columns]
- 
+
         # Stooq columns: Date, Open, High, Low, Close, Volume
         if "Date" not in df.columns or "Close" not in df.columns:
             return None
- 
+
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
         df = df.dropna(subset=["Date"]).set_index("Date").sort_index()
- 
+
         if df.empty or len(df) < 20:
             return None
- 
+
         cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]
         result = df[cols].apply(pd.to_numeric, errors="coerce").dropna(subset=["Close"])
         return result if not result.empty else None
- 
+
     except Exception:
         return None
- 
- 
+
+
 def fetch_universe_parallel(
     tickers: list[str],
     start_date: str,
@@ -385,10 +385,10 @@ def fetch_universe_parallel(
     missing  = []
     total    = len(tickers)
     done     = [0]
- 
+
     def _download(t):
         return t, fetch_single_ticker_stooq(t, start_date, end_date)
- 
+
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures = {ex.submit(_download, t): t for t in tickers}
         for fut in as_completed(futures):
@@ -403,18 +403,18 @@ def fetch_universe_parallel(
                 found.append(ticker)
             else:
                 missing.append(ticker)
- 
+
     if not frames["Close"]:
         return {}, found, missing
- 
+
     result = {}
     for c in ["Open", "High", "Low", "Close", "Volume"]:
         if frames[c]:
             result[c] = pd.DataFrame(frames[c]).sort_index()
- 
+
     return result, found, missing
- 
- 
+
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_data_cached(tickers_tuple: tuple, start_date: str, end_date: str):
     """
@@ -425,8 +425,8 @@ def fetch_data_cached(tickers_tuple: tuple, start_date: str, end_date: str):
     tickers = list(tickers_tuple)
     # We can't use progress_callback inside a cached function, so no progress here.
     return fetch_universe_parallel(tickers, start_date, end_date, progress_callback=None)
- 
- 
+
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_etf_stooq(ticker: str, start_date: str, end_date: str) -> pd.Series | None:
     """Fetch a single ETF series (QQQ/SPY) from Stooq."""
@@ -442,8 +442,8 @@ def fetch_etf_stooq(ticker: str, start_date: str, end_date: str) -> pd.Series | 
     except Exception:
         pass
     return None
- 
- 
+
+
 # ─────────────────────────────────────────────
 # BACKTEST ENGINE
 # ─────────────────────────────────────────────
@@ -462,14 +462,14 @@ def run_backtest(data, tickers, params, initial_capital, strategy_mode="atr", pr
     brp  = params["base_risk_pct"]
     mnp  = params["min_price"]
     rev  = params.get("stop_review_bars", 10)
- 
+
     raw   = []
     close = data.get("Close", pd.DataFrame())
     valid = [t for t in tickers if t in close.columns]
     total = len(valid)
     if total == 0:
         return pd.DataFrame()
- 
+
     for idx, ticker in enumerate(valid):
         if progress_bar:
             progress_bar.progress((idx + 1) / total, text=f"Scanning {ticker}…")
@@ -479,29 +479,29 @@ def run_backtest(data, tickers, params, initial_capital, strategy_mode="atr", pr
             h   = data["High"][ticker].reindex(c.index).ffill()
             lo  = data["Low"][ticker].reindex(c.index).ffill()
             vol = data["Volume"][ticker].reindex(c.index).fillna(0)
- 
+
             mb = max(bp, ap, s2, vmp) + 10
             if len(c) < mb:
                 continue
- 
+
             tr     = pd.concat([h - lo, (h - c.shift(1)).abs(), (lo - c.shift(1)).abs()], axis=1).max(axis=1)
             atr    = tr.ewm(span=ap, adjust=False).mean()
             sma200 = c.rolling(s2).mean()
             sma50  = c.rolling(s5).mean()
             volma  = vol.rolling(vmp).mean()
- 
+
             if strategy_mode == "atr":
                 cbh  = pd.concat([o, c], axis=1).max(axis=1)
                 hb52 = cbh.rolling(bp).max()
             else:
                 hb52 = h.rolling(bp).max()
- 
+
             in_t  = False
             slvl  = entry = hbh = hba = np.nan
             age   = bsa = pyc = 0
             bsr   = 0
             high_since_review = np.nan
- 
+
             for j in range(mb, len(c)):
                 cv = c.iloc[j]; lv = lo.iloc[j]; hv = h.iloc[j]
                 cb = cbh.iloc[j] if strategy_mode == "atr" else hv
@@ -509,24 +509,24 @@ def run_backtest(data, tickers, params, initial_capital, strategy_mode="atr", pr
                 v2 = sma200.iloc[j]; v5 = sma50.iloc[j]
                 vl = vol.iloc[j];  vm = volma.iloc[j]
                 dt = c.index[j]
- 
+
                 if pd.isna(hb) or pd.isna(av) or pd.isna(v2):
                     continue
- 
+
                 sd = am * av
                 ok = vm >= mav
                 vs = vl >= vm * vsm
                 a2 = cv > v2; a5 = cv > v5; px = cv >= mnp
- 
+
                 if strategy_mode == "atr":
                     esig = cb >= hb and a2 and a5 and not in_t and vs and ok and px
                 else:
                     esig = hv == hb and a2 and not in_t and vs and ok and px
- 
+
                 asig = in_t and a2 and hv > hba and bsa >= ms and age < ma and vl > vm and pyc < mp
                 sh   = in_t and lv < slvl
                 te   = in_t and age >= ma
- 
+
                 if esig:
                     in_t  = True
                     entry = cv; slvl = cv - sd; hbh = cb; hba = hv
@@ -540,7 +540,7 @@ def run_backtest(data, tickers, params, initial_capital, strategy_mode="atr", pr
                         "exit_type": None, "pyramid_adds": 0,
                         "trade_age": 0, "_qty": 0, "_eq": 0.0,
                     })
- 
+
                 elif sh or te:
                     xp = slvl if sh else cv
                     xt = "Stop" if sh else "TimeExit"
@@ -554,21 +554,21 @@ def run_backtest(data, tickers, params, initial_capital, strategy_mode="atr", pr
                     slvl  = entry = hbh = hba = np.nan
                     age   = bsa = pyc = bsr = 0
                     high_since_review = np.nan
- 
+
                 elif in_t:
                     age += 1; bsa += 1
- 
+
                     if strategy_mode == "atr":
                         if cb > hbh: hbh = cb
                         ns = hbh - sd
                         if ns > slvl: slvl = ns
                         if asig: hba = hv; bsa = 0; pyc += 1
                         elif hv > hba: hba = hv
- 
+
                     elif strategy_mode == "mtp":
                         if asig: slvl = cv - sd; hba = hv; bsa = 0; pyc += 1
                         elif hv > hba: hba = hv
- 
+
                     elif strategy_mode == "10bar":
                         bsr += 1
                         if hv > high_since_review: high_since_review = hv
@@ -582,27 +582,27 @@ def run_backtest(data, tickers, params, initial_capital, strategy_mode="atr", pr
                                 if ns > slvl: slvl = ns
                             bsr = 0; high_since_review = hv
                         if not asig and hv > hba: hba = hv
- 
+
         except Exception:
             continue
- 
+
     raw = [s for s in raw if s["exit_date"] is not None]
     if not raw:
         return pd.DataFrame()
- 
+
     # Portfolio simulation — 2:1 leverage
     LEVERAGE = 2.0
     raw.sort(key=lambda x: (x["entry_date"], -x.get("rel_vol", 0)))
     eq = float(initial_capital); bp_ = eq * LEVERAGE
     open_  = {}; trades = []; taken = set()
- 
+
     all_dates = sorted(set([s["entry_date"] for s in raw] + [s["exit_date"] for s in raw]))
     by_entry  = defaultdict(list)
     by_exit   = defaultdict(list)
     for s in raw:
         by_entry[s["entry_date"]].append(s)
         by_exit[s["exit_date"]].append(s)
- 
+
     for dt in all_dates:
         for s in by_exit[dt]:
             if id(s) not in taken: continue
@@ -624,7 +624,7 @@ def run_backtest(data, tickers, params, initial_capital, strategy_mode="atr", pr
             open_.pop(s["ticker"], 0)
             eq  = max(eq + pnl, 1.0)
             used = sum(open_.values()); bp_ = max(eq * LEVERAGE - used, 0.0)
- 
+
         for s in by_entry[dt]:
             sd = s["stop_dist"]
             if sd <= 0 or pd.isna(sd) or s["ticker"] in open_: continue
@@ -633,11 +633,11 @@ def run_backtest(data, tickers, params, initial_capital, strategy_mode="atr", pr
             if need > bp_: continue
             taken.add(id(s)); s["_qty"] = qty; s["_eq"] = eq
             open_[s["ticker"]] = need; bp_ -= need
- 
+
     trades.sort(key=lambda x: x["exit_date"])
     return pd.DataFrame(trades)
- 
- 
+
+
 # ─────────────────────────────────────────────
 # METRICS
 # ─────────────────────────────────────────────
@@ -686,8 +686,8 @@ def compute_metrics(df, initial_capital, start_date, end_date):
         "Expectancy":    f"{exp:.2f}%",
         "_cagr": cagr, "_sharpe": sh, "_calmar": cal, "_maxdd": mdd, "_pf": pf,
     }, equity, dd
- 
- 
+
+
 # ─────────────────────────────────────────────
 # BENCHMARKS
 # ─────────────────────────────────────────────
@@ -709,7 +709,7 @@ def compute_dca(ticker, initial_capital, monthly, start_date, end_date):
             last_m  = dt.month
         eq.iloc[i] = shares * prices.iloc[i]
     return eq
- 
+
 def add_monthly(equity, monthly):
     if monthly <= 0:
         return equity
@@ -719,8 +719,8 @@ def add_monthly(equity, monthly):
             cum += monthly; last_m = dt.month
         eq.iloc[i] += cum
     return eq
- 
- 
+
+
 # ─────────────────────────────────────────────
 # CHARTS
 # ─────────────────────────────────────────────
@@ -731,7 +731,7 @@ COLORS = {
     "qqq":   "#a855f7",
     "spy":   "#6b7fa3",
 }
- 
+
 def chart_comparison(results, qqq=None, spy=None, monthly=0):
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
                         row_heights=[0.72, 0.28], vertical_spacing=0.03)
@@ -757,7 +757,7 @@ def chart_comparison(results, qqq=None, spy=None, monthly=0):
     fig.update_yaxes(title_text="Portfolio ($)", row=1, col=1)
     fig.update_yaxes(title_text="Drawdown (%)", row=2, col=1)
     return fig
- 
+
 def chart_annual(equity, color, name):
     ann    = equity.resample("YE").last().pct_change().dropna() * 100
     colors = [color if v >= 0 else "#ff5555" for v in ann.values]
@@ -769,7 +769,7 @@ def chart_annual(equity, color, name):
     fig.update_xaxes(gridcolor="#141b2d")
     fig.update_yaxes(gridcolor="#141b2d", zeroline=True, zerolinecolor="#2a3550")
     return fig
- 
+
 def chart_dist(df, color, name):
     if df.empty:
         return go.Figure()
@@ -780,15 +780,15 @@ def chart_dist(df, color, name):
         title_font=dict(color=color))
     fig.update_xaxes(gridcolor="#141b2d"); fig.update_yaxes(gridcolor="#141b2d")
     return fig
- 
+
 def mc(label, value, pos_good=True, color=None):
     neg = isinstance(value, str) and value.startswith("-")
     if color:
         return f'<div class="metric-card"><div class="metric-label">{label}</div><div class="metric-value" style="color:{color}">{value}</div></div>'
     css = ("negative" if pos_good else "positive") if neg else ("positive" if pos_good else "negative")
     return f'<div class="metric-card"><div class="metric-label">{label}</div><div class="metric-value {css}">{value}</div></div>'
- 
- 
+
+
 # ─────────────────────────────────────────────
 # OPTIMIZER
 # ─────────────────────────────────────────────
@@ -816,44 +816,44 @@ def suggest(space, past, n_start=10):
             n     = int(round((val - lo) / step))
             p[k]  = round(lo + n * step, 4)
     return p
- 
- 
+
+
 # ─────────────────────────────────────────────
 # SIDEBAR
 # ─────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## ⚙️ Settings")
- 
+
     with st.expander("📊 Universe & Data", expanded=True):
         st.caption("Data source: **Stooq.com** — bulk zip discovery, cached 24h")
- 
+
         universe = st.selectbox("Universe", ["All (NYSE + Nasdaq ~8k)", "Custom"])
         custom_tickers = []
         if universe == "Custom":
             raw_input      = st.text_area("Tickers (comma-separated)", "AAPL, MSFT, NVDA")
             custom_tickers = [t.strip().upper() for t in raw_input.split(",") if t.strip()]
- 
+
         if "All" in universe:
             all_tickers = get_stooq_ticker_list()
             n = len(all_tickers)
             st.success(f"✅ {n:,} tickers loaded (NYSE + Nasdaq universe)")
         else:
             all_tickers = []
- 
+
         c1, c2 = st.columns(2)
         with c1: start_date = st.date_input("Start", datetime(1995, 1, 1))
         with c2: end_date   = st.date_input("End",   datetime.today())
- 
+
         initial_capital      = st.number_input("Capital ($)",      min_value=1000,   value=10000, step=1000)
         monthly_contribution = st.number_input("Monthly Add ($)",  min_value=0,      value=500,   step=100)
- 
+
     with st.expander("🔀 Strategy Selection", expanded=True):
         run_s1   = st.toggle("S1 — ATR Trailing Stop",  value=True)
         run_s2   = st.toggle("S2 — MTP Static Stop",    value=True)
         run_s3   = st.toggle("S3 — 10-Bar Static Stop", value=True)
         show_qqq = st.toggle("Show QQQ benchmark",      value=True)
         show_spy = st.toggle("Show SPY benchmark",       value=True)
- 
+
     with st.expander("🎯 Strategy Parameters", expanded=True):
         breakout_period  = st.number_input("52W Lookback",            10,  504,  252)
         atr_period       = st.number_input("ATR Period",              1,   500,  293)
@@ -863,33 +863,33 @@ with st.sidebar:
         max_age          = st.number_input("Max Trade Age (bars)",    10,  2000, 584)
         base_risk_pct    = st.number_input("Risk % per Trade",        0.1, 10.0, 2.0,  step=0.25)
         stop_review_bars = st.number_input("Stop Review Interval (S3)", 1, 50,   10)
- 
+
     with st.expander("📈 Moving Averages", expanded=True):
         sma200 = st.number_input("Trend SMA Period",   1, 500, 200)
         sma50  = st.number_input("Context SMA Period", 1, 300, 50)
- 
+
     with st.expander("🔊 Volume"):
         vol_ma_period  = st.number_input("Volume MA Period",       5,  100,        20)
         vol_spike_mult = st.number_input("Volume Spike Multiplier",1.0, 5.0,       1.5, step=0.1)
         min_avg_vol    = st.number_input("Min Avg Volume",         0,   10_000_000, 1_000_000, step=100_000)
- 
+
     with st.expander("🔍 Price"):
         min_price = st.number_input("Min Price ($)", 0.0, 500.0, 10.0, step=0.5)
- 
+
     st.markdown("---")
     run_btn = st.button("🚀 Run Comparison")
- 
- 
+
+
 # ─────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────
 st.markdown("# 📈 Stock Trend Trader — Strategy Comparison")
 st.markdown("*Compare ATR Trailing · MTP Static · 10-Bar Static · vs QQQ & SPY benchmarks*")
 st.markdown("---")
- 
+
 main_tab1, main_tab2 = st.tabs(["📊 Strategy Comparison", "🔬 Optimization"])
- 
- 
+
+
 # ══════════════════════════════════════════
 # TAB 1 — COMPARISON
 # ══════════════════════════════════════════
@@ -900,7 +900,7 @@ with main_tab1:
         The first run over the full universe (~8 000 tickers) takes a few minutes; subsequent runs are instant.<br>
         Toggle strategies in the sidebar, then click <strong>Run Comparison</strong>.
         </div>""", unsafe_allow_html=True)
- 
+
         c1, c2, c3 = st.columns(3)
         with c1:
             st.markdown("""**S1 — ATR Trailing Stop** 🟢
@@ -911,17 +911,17 @@ Stop is frozen between pyramid adds — only resets when an add fires.""")
         with c3:
             st.markdown("""**S3 — 10-Bar Static Stop** 🟠
 Stop reviews every N bars; only updates if a new high was made in that window.""")
- 
+
     else:
         active = []
         if run_s1: active.append("atr")
         if run_s2: active.append("mtp")
         if run_s3: active.append("10bar")
- 
+
         if not active:
             st.error("Select at least one strategy.")
             st.stop()
- 
+
         params = {
             "breakout_period":  breakout_period,
             "atr_period":       atr_period,
@@ -938,20 +938,20 @@ Stop reviews every N bars; only updates if a new high was made in that window.""
             "min_price":        min_price,
             "stop_review_bars": stop_review_bars,
         }
- 
+
         tickers = custom_tickers if universe == "Custom" else all_tickers
         if not tickers:
             st.error("No tickers loaded. Check your universe selection or Stooq connectivity.")
             st.stop()
- 
+
         st.info(f"Universe: **{len(tickers)} tickers** | Strategies: **{len(active)}** | {start_date} → {end_date}")
- 
+
         # ── Data loading with parallel threads ──
         load_placeholder = st.empty()
         load_placeholder.info("⏳ Downloading data from Stooq… (first run takes ~2–5 min for full universe)")
- 
+
         prog = st.progress(0, text="Starting parallel downloads…")
- 
+
         # Use the non-cached version so we can show progress, then cache the result
         data, found, missing = fetch_universe_parallel(
             tickers, str(start_date), str(end_date),
@@ -959,40 +959,40 @@ Stop reviews every N bars; only updates if a new high was made in that window.""
         )
         prog.empty()
         load_placeholder.empty()
- 
+
         if not data:
             st.error("No data downloaded from Stooq. Check your internet connection.")
             st.stop()
- 
+
         hit_rate = len(found) / len(tickers) * 100
         st.success(f"✅ Downloaded **{len(found)}/{len(tickers)}** tickers ({hit_rate:.0f}% hit rate) — {len(missing)} not found on Stooq")
- 
+
         mode_names  = {"atr": "S1: ATR Trailing", "mtp": "S2: MTP Static", "10bar": "S3: 10-Bar Static"}
         mode_colors = {"atr": COLORS["atr"], "mtp": COLORS["mtp"], "10bar": COLORS["10bar"]}
- 
+
         all_results = {}
         all_metrics = {}
         all_trades  = {}
- 
+
         for mode in active:
             with st.spinner(f"Running {mode_names[mode]}…"):
                 prog   = st.progress(0, text=f"Scanning for {mode_names[mode]}…")
                 trades = run_backtest(data, found, params, initial_capital, mode, prog)
                 prog.empty()
- 
+
             if trades.empty:
                 st.warning(f"{mode_names[mode]}: No trades generated.")
                 continue
- 
+
             metrics, equity, drawdown = compute_metrics(trades, initial_capital, start_date, end_date)
             all_results[mode] = (equity, drawdown)
             all_metrics[mode] = metrics
             all_trades[mode]  = trades
- 
+
         if not all_results:
             st.warning("No results for any strategy.")
             st.stop()
- 
+
         # Benchmarks
         qqq_eq = spy_eq = None
         if show_qqq:
@@ -1001,20 +1001,20 @@ Stop reviews every N bars; only updates if a new high was made in that window.""
         if show_spy:
             with st.spinner("Loading SPY…"):
                 spy_eq = compute_dca("SPY", initial_capital, monthly_contribution, start_date, end_date)
- 
+
         # Equity curve
         st.markdown('<div class="section-header">📈 Equity Curve Comparison</div>', unsafe_allow_html=True)
         st.plotly_chart(chart_comparison(all_results, qqq_eq, spy_eq, monthly_contribution),
                         use_container_width=True)
- 
+
         n_months = (pd.to_datetime(end_date) - pd.to_datetime(start_date)).days / 30.44
         total_in = initial_capital + monthly_contribution * n_months
         st.caption(f"Total contributed: **${total_in:,.0f}** (${initial_capital:,} initial + ${monthly_contribution:,}/mo)")
- 
+
         all_cols = list(all_results.keys())
         if show_qqq and qqq_eq is not None: all_cols.append("qqq")
         if show_spy and spy_eq is not None: all_cols.append("spy")
- 
+
         cols = st.columns(len(all_cols))
         for i, key in enumerate(all_cols):
             with cols[i]:
@@ -1025,33 +1025,33 @@ Stop reviews every N bars; only updates if a new high was made in that window.""
                 else:
                     final = add_monthly(all_results[key][0], monthly_contribution).iloc[-1]
                     st.markdown(mc(f"{mode_names[key]} Final", f"${final:,.0f}", color=mode_colors[key]), unsafe_allow_html=True)
- 
+
         # Metrics table
         st.markdown('<div class="section-header">📊 Performance Metrics</div>', unsafe_allow_html=True)
         metric_keys = ["CAGR","Sharpe","Calmar","Max Drawdown","Total Trades","Win Rate","Profit Factor","Expectancy"]
         pos_good    = [True, True, True, False, True, True, True, True]
- 
+
         cols = st.columns(len(all_results))
         for i, (mode, metrics) in enumerate(all_metrics.items()):
             with cols[i]:
                 st.markdown(f'<div style="color:{mode_colors[mode]};font-weight:700;font-size:1rem;margin-bottom:8px">{mode_names[mode]}</div>', unsafe_allow_html=True)
                 for mk, pg in zip(metric_keys, pos_good):
                     st.markdown(mc(mk, metrics[mk], pg), unsafe_allow_html=True)
- 
+
         # Annual returns
         st.markdown('<div class="section-header">📅 Annual Returns</div>', unsafe_allow_html=True)
         cols = st.columns(len(all_results))
         for i, (mode, (equity, _)) in enumerate(all_results.items()):
             with cols[i]:
                 st.plotly_chart(chart_annual(equity, mode_colors[mode], mode_names[mode]), use_container_width=True)
- 
+
         # Trade distribution
         st.markdown('<div class="section-header">📦 Trade Distribution</div>', unsafe_allow_html=True)
         cols = st.columns(len(all_results))
         for i, (mode, trades) in enumerate(all_trades.items()):
             with cols[i]:
                 st.plotly_chart(chart_dist(trades, mode_colors[mode], mode_names[mode]), use_container_width=True)
- 
+
         # Trade logs
         st.markdown('<div class="section-header">📋 Trade Logs</div>', unsafe_allow_html=True)
         trade_tabs = st.tabs([mode_names[m] for m in all_trades.keys()])
@@ -1065,8 +1065,8 @@ Stop reviews every N bars; only updates if a new high was made in that window.""
                 st.dataframe(ddf, use_container_width=True, height=350)
                 st.download_button(f"⬇️ Download {mode_names[mode]}",
                     ddf.to_csv(index=False), f"trades_{mode}.csv", "text/csv")
- 
- 
+
+
 # ══════════════════════════════════════════
 # TAB 2 — OPTIMIZATION
 # ══════════════════════════════════════════
@@ -1076,18 +1076,18 @@ with main_tab2:
     Optimize parameters for a chosen strategy. Run multiple times with different metrics,
     then find your middle ground manually.
     </div>""", unsafe_allow_html=True)
- 
+
     oc1, oc2, oc3 = st.columns(3)
     with oc1: opt_metric   = st.selectbox("Optimize For", ["Calmar","Sharpe","CAGR","Profit Factor"])
     with oc2: opt_strategy = st.selectbox("Strategy to Optimize", ["S1: ATR Trailing","S2: MTP Static","S3: 10-Bar Static"])
     with oc3: n_trials     = st.number_input("Trials", 5, 200, 30, step=5)
- 
+
     opt_universe = st.selectbox("Universe", ["All (NYSE + Nasdaq ~8k)","Custom"], key="ou")
     custom_opt   = []
     if opt_universe == "Custom":
         ci         = st.text_area("Tickers", "AAPL, MSFT, NVDA", key="ct")
         custom_opt = [t.strip().upper() for t in ci.split(",") if t.strip()]
- 
+
     st.markdown("#### Search Ranges")
     sr1, sr2 = st.columns(2)
     with sr1:
@@ -1102,27 +1102,27 @@ with main_tab2:
         s5_r = st.slider("Context SMA Period",    20,   100,  (40, 70),   step=5)
         vs_r = st.slider("Vol Spike Multiplier",  1.0,  3.0,  (1.2, 2.0), step=0.1)
         br_r = st.slider("Base Risk %",           0.5,  5.0,  (1.0, 3.5), step=0.25)
- 
+
     oc4, oc5, oc6 = st.columns(3)
     with oc4: opt_start = st.date_input("Start", datetime(2005, 1, 1), key="os")
     with oc5: opt_end   = st.date_input("End",   datetime.today(),     key="oe")
     with oc6: opt_cap   = st.number_input("Capital ($)", 1000, 10_000_000, 10000, step=1000, key="oc")
- 
+
     run_opt = st.button("🚀 Run Optimization")
- 
+
     if run_opt:
         opt_mode_map = {"S1: ATR Trailing": "atr", "S2: MTP Static": "mtp", "S3: 10-Bar Static": "10bar"}
         opt_mode     = opt_mode_map[opt_strategy]
- 
+
         opt_tickers = custom_opt if opt_universe == "Custom" else all_tickers
         if not opt_tickers:
             st.error("No tickers loaded — run from the main tab first to populate the universe."); st.stop()
- 
+
         score_map = {"Calmar":"_calmar","Sharpe":"_sharpe","CAGR":"_cagr","Profit Factor":"_pf"}
         sort_map  = {"Calmar":"Calmar","Sharpe":"Sharpe","CAGR":"CAGR%","Profit Factor":"Profit Factor"}
         skey = score_map[opt_metric]
         scol = sort_map[opt_metric]
- 
+
         space = {
             "breakout_period": (bp_r[0], bp_r[1], 10,   "int"),
             "atr_period":      (ap_r[0], ap_r[1], 5,    "int"),
@@ -1141,7 +1141,7 @@ with main_tab2:
             "min_price":        min_price,
             "stop_review_bars": stop_review_bars,
         }
- 
+
         st.info(f"Loading {len(opt_tickers)} tickers for optimization…")
         opt_prog = st.progress(0, text="Downloading data…")
         opt_data, opt_found, _ = fetch_universe_parallel(
@@ -1149,22 +1149,22 @@ with main_tab2:
             progress_callback=lambda pct, txt: opt_prog.progress(pct, text=txt),
         )
         opt_prog.empty()
- 
+
         if not opt_data:
             st.error("No data loaded."); st.stop()
- 
+
         st.success(f"Loaded {len(opt_found)} tickers. Starting {n_trials} trials…")
- 
+
         results = []; past = []; best_s = -np.inf; best_t = None
         tbl     = st.empty()
         prog    = st.progress(0, text="Starting…")
- 
+
         for n in range(1, n_trials + 1):
             prog.progress(n / n_trials, text=f"Trial {n}/{n_trials} | Best {opt_metric}: {best_s:.4f}")
             tp  = suggest(space, past)
             fp  = {**tp, **fixed}
             tdf = run_backtest(opt_data, opt_found, fp, opt_cap, opt_mode)
- 
+
             if tdf.empty:
                 score = -999.0
                 row   = {"trial": n, **{k: tp[k] for k in space},
@@ -1181,19 +1181,19 @@ with main_tab2:
                            "Max DD%":       round(m["_maxdd"] * 100, 2),
                            "Win Rate%":     float(m["Win Rate"].replace("%", "")),
                            "Trades":        m["Total Trades"]}
- 
+
             past.append({"params": tp, "score": score})
             results.append(row)
             if score > best_s:
                 best_s = score; best_t = row.copy()
- 
+
             if n % 3 == 0 or n == n_trials:
                 tbl.dataframe(pd.DataFrame(results).sort_values(scol, ascending=False),
                               use_container_width=True, height=400)
- 
+
         prog.empty()
         st.markdown(f"---\n### ✅ Done — Best {opt_metric}: **{best_s:.4f}**")
- 
+
         if best_t:
             st.markdown(f"#### 🏆 Best Trial — {opt_strategy}")
             bc1, bc2, bc3, bc4 = st.columns(4)
@@ -1209,7 +1209,7 @@ with main_tab2:
             with bc4:
                 st.markdown(mc("Trades", str(best_t["Trades"])), unsafe_allow_html=True)
             st.dataframe(pd.DataFrame([{k: best_t[k] for k in space}]), use_container_width=True)
- 
+
         final = pd.DataFrame(results).sort_values(scol, ascending=False).reset_index(drop=True)
         final.index += 1
         st.markdown("#### All Trials")
