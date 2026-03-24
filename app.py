@@ -36,11 +36,49 @@ st.markdown("""
 
 
 # ─────────────────────────────────────────────
-# UNIVERSE — all tickers available in Drive
+# DATA — Google Drive (Stooq CSV files)
+# Public folder, no API key needed
+# Folder ID: 1sbmWg11ZUU0kgm3yqGVVkQJoXRQ1NNmp
 # ─────────────────────────────────────────────
+import io
+
+DRIVE_FOLDER_ID = "1sbmWg11ZUU0kgm3yqGVVkQJoXRQ1NNmp"
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_drive_file_list():
+    """
+    Scrape the public Google Drive folder page to get file names and IDs.
+    No API key required for public folders.
+    """
+    try:
+        url = f"https://drive.google.com/drive/folders/{DRIVE_FOLDER_ID}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, headers=headers, timeout=30)
+        if r.status_code != 200:
+            return {}
+        # Parse file IDs and names from the page source
+        import re
+        # Google Drive embeds file data as JSON in the page
+        # Pattern matches ["filename","file_id", ...]
+        pattern = r'\["([^"]+\.(?:us\.txt|us\.csv|txt|csv))","([a-zA-Z0-9_-]{25,})"'
+        matches = re.findall(pattern, r.text)
+        mapping = {}
+        for name, fid in matches:
+            ticker = (name
+                      .replace(".us.txt","")
+                      .replace(".us.csv","")
+                      .replace(".txt","")
+                      .replace(".csv","")
+                      .upper()
+                      .replace(".","-"))
+            mapping[ticker] = fid
+        return mapping
+    except Exception:
+        return {}
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_all_drive_tickers():
-    """Return sorted list of all tickers available in the Drive folder."""
+    """Return sorted list of all tickers in Drive folder."""
     file_map = get_drive_file_list()
     return sorted([t for t in file_map.keys() if t and not t.startswith(".")])
 
@@ -51,44 +89,6 @@ def get_universe(choice, all_tickers=None):
         return []
     return all_tickers or []
 
-
-# ─────────────────────────────────────────────
-# DATA — Google Drive (Stooq CSV files)
-# Folder: https://drive.google.com/drive/folders/1sbmWg11ZUU0kgm3yqGVVkQJoXRQ1NNmp
-# ─────────────────────────────────────────────
-import requests
-import io
-
-DRIVE_FOLDER_ID = "1sbmWg11ZUU0kgm3yqGVVkQJoXRQ1NNmp"
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def get_drive_file_list():
-    """Get list of all files in the Google Drive folder."""
-    url = f"https://drive.google.com/drive/folders/{DRIVE_FOLDER_ID}"
-    # Use the public Google Drive API (no auth needed for public folders)
-    api_url = f"https://www.googleapis.com/drive/v3/files"
-    params = {
-        "q": f"'{DRIVE_FOLDER_ID}' in parents",
-        "fields": "files(id,name)",
-        "pageSize": 1000,
-        "key": "AIzaSyD-9tSrke72PouQMnMX-a7eZSW0jkFMBWY"  # public API key for Drive
-    }
-    try:
-        r = requests.get(api_url, params=params, timeout=30)
-        if r.status_code == 200:
-            files = r.json().get("files", [])
-            # Build ticker -> file_id mapping
-            # aapl.us.txt -> AAPL
-            mapping = {}
-            for f in files:
-                name = f["name"]
-                ticker = name.replace(".us.txt","").replace(".us.csv","").replace(".txt","").replace(".csv","").upper().replace(".","-")
-                mapping[ticker] = f["id"]
-            return mapping
-    except Exception:
-        pass
-    return {}
-
 @st.cache_data(ttl=86400, show_spinner=False)
 def load_ticker_from_drive(ticker, start_date, end_date):
     """Download and parse a single ticker CSV from Google Drive."""
@@ -97,13 +97,13 @@ def load_ticker_from_drive(ticker, start_date, end_date):
     if file_id is None:
         return None
     try:
-        # Direct download URL for public Google Drive files
+        # Direct download URL for individual public files
         url = f"https://drive.google.com/uc?export=download&id={file_id}"
-        r   = requests.get(url, timeout=30)
-        if r.status_code != 200:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, headers=headers, timeout=30)
+        if r.status_code != 200 or not r.text.strip():
             return None
         df = pd.read_csv(io.StringIO(r.text))
-        # Strip angle brackets from Stooq headers e.g. <DATE> -> DATE
         df.columns = [c.strip().upper().replace("<","").replace(">","") for c in df.columns]
         rename = {}
         for c in df.columns:
@@ -116,7 +116,6 @@ def load_ticker_from_drive(ticker, start_date, end_date):
         df = df.rename(columns=rename)
         if "Date" not in df.columns or "Close" not in df.columns:
             return None
-        # Stooq date format: YYYYMMDD
         df["Date"] = pd.to_datetime(df["Date"].astype(str), format="%Y%m%d", errors="coerce")
         df = df.dropna(subset=["Date"]).set_index("Date").sort_index()
         df = df[str(start_date):str(end_date)]
