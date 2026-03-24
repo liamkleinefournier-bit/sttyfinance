@@ -303,15 +303,98 @@ _UNIVERSE = (
 )
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+@st.cache_data(ttl=86400, show_spinner=False)
 def get_stooq_ticker_list() -> list[str]:
     """
-    Returns the full embedded NYSE + Nasdaq common stock universe.
-    No network call — instant, always works.
-    Covers S&P 500/400/600, Russell 1000/2000, and Nasdaq growth stocks.
+    Fetches the complete NYSE + Nasdaq common stock universe from NASDAQ's
+    official symbol directory files — two tiny public pipe-delimited text
+    files that require no authentication:
+
+      nasdaqlisted.txt  ~4,000 Nasdaq-listed securities
+      otherlisted.txt   ~4,500 NYSE/AMEX-listed securities
+
+    We filter to common shares only:
+      - Test Issue = N  (excludes test/placeholder symbols)
+      - ETF = N         (excludes ETFs)
+      - Symbol is 1-5 pure alpha chars (excludes warrants, rights, units)
+
+    This reliably yields ~6,000-8,000 common stock tickers.
+    Falls back to the embedded ~2,500-ticker list if NASDAQ is unreachable.
     """
-    raw   = set(t.strip() for t in _UNIVERSE.replace("\n", "").split(",") if t.strip())
-    clean = {t for t in raw if 1 <= len(t) <= 5 and t.isalpha()}
-    return sorted(clean)
+    NASDAQ_URLS = {
+        "nasdaq": "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt",
+        "other":  "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt",
+    }
+
+    tickers = set()
+
+    try:
+        for market, url in NASDAQ_URLS.items():
+            r = requests.get(url, headers=HEADERS, timeout=20)
+            if r.status_code != 200 or len(r.text) < 500:
+                continue
+
+            lines = r.text.strip().splitlines()
+            if not lines:
+                continue
+
+            # Parse pipe-delimited header to find column indices
+            header = [h.strip().lower() for h in lines[0].split("|")]
+
+            if market == "nasdaq":
+                # Columns: Symbol | Security Name | Market Category | Test Issue | Financial Status | Round Lot Size | ETF | NextShares
+                try:
+                    sym_col      = header.index("symbol")
+                    test_col     = header.index("test issue")
+                    etf_col      = header.index("etf")
+                except ValueError:
+                    sym_col, test_col, etf_col = 0, 3, 6
+
+                for line in lines[1:]:
+                    if line.startswith("File Creation Time"):
+                        continue
+                    parts = line.split("|")
+                    if len(parts) <= max(sym_col, test_col, etf_col):
+                        continue
+                    sym  = parts[sym_col].strip().upper()
+                    test = parts[test_col].strip().upper()
+                    etf  = parts[etf_col].strip().upper()
+                    if test == "N" and etf == "N" and 1 <= len(sym) <= 5 and sym.isalpha():
+                        tickers.add(sym)
+
+            else:  # other (NYSE/AMEX)
+                # Columns: ACT Symbol | Security Name | Exchange | CQS Symbol | ETF | Round Lot Size | Test Issue | NASDAQ Symbol
+                try:
+                    sym_col      = header.index("act symbol")
+                    test_col     = header.index("test issue")
+                    etf_col      = header.index("etf")
+                except ValueError:
+                    sym_col, test_col, etf_col = 0, 6, 4
+
+                for line in lines[1:]:
+                    if line.startswith("File Creation Time"):
+                        continue
+                    parts = line.split("|")
+                    if len(parts) <= max(sym_col, test_col, etf_col):
+                        continue
+                    sym  = parts[sym_col].strip().upper()
+                    test = parts[test_col].strip().upper()
+                    etf  = parts[etf_col].strip().upper()
+                    if test == "N" and etf == "N" and 1 <= len(sym) <= 5 and sym.isalpha():
+                        tickers.add(sym)
+
+    except Exception:
+        pass
+
+    # Fall back to embedded list if fetch yielded too few results
+    if len(tickers) < 1000:
+        embedded = set(
+            t.strip() for t in _UNIVERSE.replace("\n", "").split(",") if t.strip()
+        )
+        tickers.update(t for t in embedded if 1 <= len(t) <= 5 and t.isalpha())
+
+    return sorted(tickers)
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -834,9 +917,13 @@ with st.sidebar:
             custom_tickers = [t.strip().upper() for t in raw_input.split(",") if t.strip()]
 
         if "All" in universe:
-            all_tickers = get_stooq_ticker_list()
+            with st.spinner("Loading ticker universe…"):
+                all_tickers = get_stooq_ticker_list()
             n = len(all_tickers)
-            st.success(f"✅ {n:,} tickers loaded (NYSE + Nasdaq universe)")
+            if n >= 4000:
+                st.success(f"✅ {n:,} tickers (NYSE + Nasdaq, live from NASDAQ directory)")
+            else:
+                st.warning(f"⚠️ {n:,} tickers (NASDAQ directory unreachable — using embedded fallback)")
         else:
             all_tickers = []
 
