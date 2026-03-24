@@ -37,7 +37,7 @@ st.markdown("""
 # ─────────────────────────────────────────────
 STOOQ_BASE      = "https://stooq.com/q/d/l/"
 HEADERS         = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-MAX_WORKERS     = 30
+MAX_WORKERS     = 15
 REQUEST_TIMEOUT = 20
 
 
@@ -254,6 +254,8 @@ def get_ticker_list() -> list:
 
 def fetch_single(ticker: str, start_date: str, end_date: str):
     """Download OHLCV from Stooq for one ticker."""
+    import time, random
+    time.sleep(random.uniform(0.05, 0.15))  # small jitter to avoid rate limits
     try:
         s      = start_date.replace("-", "")
         e      = end_date.replace("-", "")
@@ -265,8 +267,12 @@ def fetch_single(ticker: str, start_date: str, end_date: str):
         text = r.text.strip()
         if len(text) < 30:
             return None
-        bad = ("No data", "Exceeded the daily", "<!DOCTYPE", "<html", "error")
-        if any(b.lower() in text.lower() for b in bad):
+        bad = ("No data", "Exceeded", "<!DOCTYPE", "<html", "<!doctype", "exceeded")
+        if any(b.lower() in text[:200].lower() for b in bad):
+            return None
+        # Must start with a CSV header line
+        first_line = text.splitlines()[0].lower()
+        if "date" not in first_line:
             return None
         df = pd.read_csv(io.StringIO(text))
         if df.empty:
@@ -303,7 +309,7 @@ def download_universe(tickers, start_date, end_date, progress_bar=None):
             done[0] += 1
             if progress_bar and done[0] % 100 == 0:
                 pct = done[0] / total
-                progress_bar.progress(pct, text=f"Downloaded {done[0]:,}/{total:,} tickers…")
+                progress_bar.progress(pct, text=f"Downloaded {done[0]:,}/{total:,} — {len(found):,} loaded so far…")
             if df is not None and not df.empty:
                 for c in ["Open","High","Low","Close","Volume"]:
                     if c in df.columns:
