@@ -11,9 +11,9 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 import warnings
 warnings.filterwarnings("ignore")
-
+ 
 st.set_page_config(page_title="Stock Trend Trader", layout="wide", initial_sidebar_state="expanded")
-
+ 
 st.markdown("""
 <style>
     .stApp { background-color: #0a0e17; color: #e8eaf0; }
@@ -30,278 +30,137 @@ st.markdown("""
     .section-header { font-size: 1.2rem; font-weight: 700; color: #e8eaf0; margin: 20px 0 10px 0; padding-bottom: 8px; border-bottom: 2px solid #1e2d4a; }
 </style>
 """, unsafe_allow_html=True)
-
-
+ 
+ 
 # ─────────────────────────────────────────────
-# STOOQ DATA LAYER
+# GOOGLE DRIVE DATA LAYER
 # ─────────────────────────────────────────────
-STOOQ_BASE      = "https://stooq.com/q/d/l/"
+DRIVE_FOLDER_ID = "1sbmWg11ZUU0kgm3yqGVVkQJoXRQ1NNmp"
+DRIVE_API_KEY   = "AIzaSyC-jvjhm7FKkbmn2GLLgxWi8_gJCCS9a9Y"
 HEADERS         = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-MAX_WORKERS     = 15
-REQUEST_TIMEOUT = 20
-
-
+MAX_WORKERS     = 10
+REQUEST_TIMEOUT = 30
+ 
+ 
 @st.cache_data(ttl=86400, show_spinner=False)
-def get_ticker_list() -> list:
+def get_drive_file_map():
     """
-    Fetch full NYSE + Nasdaq common stock universe from NASDAQ's
-    official symbol directory. Falls back to embedded list if unreachable.
+    Fetch all file IDs from the public Google Drive folder using the Drive API.
+    Returns dict: {TICKER: file_id}
     """
-    NASDAQ_URLS = {
-        "nasdaq": "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt",
-        "other":  "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt",
-    }
-    tickers = set()
-    try:
-        for market, url in NASDAQ_URLS.items():
-            r = requests.get(url, headers=HEADERS, timeout=20)
-            if r.status_code != 200 or len(r.text) < 500:
-                continue
-            lines  = r.text.strip().splitlines()
-            header = [h.strip().lower() for h in lines[0].split("|")]
-            if market == "nasdaq":
-                try:
-                    sym_col  = header.index("symbol")
-                    test_col = header.index("test issue")
-                    etf_col  = header.index("etf")
-                except ValueError:
-                    sym_col, test_col, etf_col = 0, 3, 6
-            else:
-                try:
-                    sym_col  = header.index("act symbol")
-                    test_col = header.index("test issue")
-                    etf_col  = header.index("etf")
-                except ValueError:
-                    sym_col, test_col, etf_col = 0, 6, 4
-            for line in lines[1:]:
-                if line.startswith("File Creation Time"):
-                    continue
-                parts = line.split("|")
-                if len(parts) <= max(sym_col, test_col, etf_col):
-                    continue
-                sym  = parts[sym_col].strip().upper()
-                test = parts[test_col].strip().upper()
-                etf  = parts[etf_col].strip().upper()
-                if test == "N" and etf == "N" and 1 <= len(sym) <= 5 and sym.isalpha():
-                    tickers.add(sym)
-    except Exception:
-        pass
-
-    # Embedded fallback
-    if len(tickers) < 1000:
-        fallback = (
-            "A,AA,AAL,AAON,AAP,AAPL,ABBV,ABC,ABMD,ABT,ABUS,ACN,ADBE,ADI,ADM,ADP,ADSK,"
-            "AEE,AEP,AES,AFL,AGIO,AGCO,AIG,AIRC,AIT,AIZ,AJG,AKAM,AKR,AL,ALB,ALGN,"
-            "ALK,ALLE,ALLY,ALNY,AM,AMCR,AME,AMED,AMG,AMGN,AMH,AMP,AMT,AN,ANET,ANF,"
-            "ANSS,AON,AOS,APA,APD,APH,APLE,APTV,AR,ARE,ARKO,ARW,ASB,ASGN,ASH,ASO,"
-            "ASTE,ATI,ATR,ATUS,AVA,AVB,AVGO,AVT,AVY,AWK,AXON,AXP,AYI,AZO,AZZ,"
-            "B,BA,BAC,BAH,BALL,BANF,BANR,BAX,BBWI,BBY,BC,BCC,BDX,BECN,BEN,BIG,"
-            "BIIB,BIO,BJRI,BKD,BKNG,BLDR,BLKB,BLMN,BMI,BMS,BMY,BN,BNL,BOKF,"
-            "BOOT,BR,BSX,BWA,BWXT,BXP,BXMT,C,CABO,CACI,CAKE,CAL,CALM,CALX,CAMT,"
-            "CAR,CARG,CARS,CASY,CAT,CATO,CATY,CBOE,CBRE,CBRL,CC,CCK,CCL,CDK,CDW,"
-            "CE,CEG,CF,CFG,CFR,CHD,CHE,CHDN,CHEF,CHGG,CHKP,CHRD,CHTR,CI,CIEN,"
-            "CINF,CIR,CIVI,CL,CLF,CLH,CLX,CMA,CMCSA,CMC,CME,CMG,CMI,CMS,CNC,"
-            "CNH,CNMD,CNO,CNP,CNX,COF,COLB,COLM,COO,COOP,COP,COST,CP,CPB,CPRT,"
-            "CRC,CRI,CRL,CRM,CROX,CRWD,CRS,CRUS,CSL,CSCO,CSX,CTAS,CTLT,CTRA,"
-            "CTSH,CTVA,CUBE,CVS,CVX,CWST,CZR,D,DAL,DCI,DD,DDS,DE,DECK,DFS,DG,"
-            "DGX,DHI,DHR,DIS,DISH,DKS,DLR,DLTR,DOV,DOW,DPZ,DRI,DTE,DUK,DVA,"
-            "DVN,DXCM,EA,EBAY,ECL,ED,EFX,EIX,EL,EME,EMN,EMR,ENPH,ENS,ENSG,"
-            "EOG,EPAM,EQH,EQIX,EQR,EQT,ERIE,ES,ESNT,ESS,ETN,ETR,ETSY,EVRG,EW,"
-            "EXC,EXPD,EXPE,EXR,FAF,FAST,FBHS,FCX,FDS,FE,FICO,FITB,FIVN,FLT,"
-            "FMC,FN,FND,FNF,FOX,FOXA,FR,FRT,FTNT,FTV,FUL,FULT,G,GD,GE,GFF,"
-            "GEHC,GEN,GILD,GIS,GL,GLW,GM,GNRC,GO,GPC,GPN,GS,GT,GTLB,GWW,GXO,"
-            "HAL,HALO,HAS,HCA,HD,HE,HES,HIG,HII,HLT,HMN,HOG,HOLX,HON,HRL,"
-            "HRMY,HST,HSY,HUM,HWC,HWM,IAA,IBP,ICE,IDXX,IEX,IFF,ILMN,INCY,"
-            "INDB,INTC,INTU,INVH,IP,IPG,IQV,IR,IRM,ISRG,IT,ITT,ITW,IVZ,J,"
-            "JBHT,JBLU,JCI,JEF,JKHY,JNJ,JNPR,JPM,JWN,K,KBH,KBR,KEYS,KHC,KIM,"
-            "KLAC,KMB,KMI,KMX,KO,KR,KRC,KRG,L,LAD,LDOS,LEN,LH,LHX,LII,LIN,"
-            "LKQ,LLY,LMT,LNC,LNT,LOW,LRCX,LSTR,LUMN,LUV,LVS,LW,LYB,LYV,MA,"
-            "MAA,MANH,MAR,MAS,MCD,MCHP,MCK,MCO,MDLZ,MDT,MET,META,MGM,MHK,"
-            "MLM,MMC,MMM,MMS,MNST,MO,MOH,MOS,MPC,MPWR,MRK,MRNA,MRO,MS,MSCI,"
-            "MSFT,MSI,MTB,MTD,MTDR,MU,NEE,NEM,NET,NFLX,NI,NKE,NNN,NOC,NRG,"
-            "NSC,NTAP,NTRS,NUE,NVDA,NVR,NVT,NXPI,NYT,O,ODFL,OGN,OHI,OKE,"
-            "OLN,OMC,ON,ONB,OPCH,ORI,ORCL,ORLY,OTIS,OXY,OZK,PAYC,PCAR,PCG,"
-            "PEP,PFE,PFG,PG,PGR,PH,PHM,PII,PKG,PLD,PM,PNC,PNR,PNW,POOL,PPG,"
-            "PPL,POST,PRG,PRU,PSA,PSX,PTC,PVH,PWR,PYPL,QCOM,R,RCL,RDN,RE,"
-            "REG,REGN,RF,RHI,RJF,RL,RLJ,RMD,ROK,ROL,ROP,ROST,RPM,RPRX,RRC,"
-            "RSG,RTX,SAFE,SAIA,SBH,SCI,SCHW,SEIC,SF,SFM,SITE,SKX,SLB,SLG,"
-            "SLM,SM,SNX,STC,STLD,SUM,SXT,T,TAP,TDG,TDY,TECH,TEL,TGT,THG,"
-            "THS,TJX,TNET,TOL,TREX,TRMK,TROW,TSN,TT,TTWO,TSCO,TXN,TYL,UAL,"
-            "UDR,UHS,ULTA,UNH,UNP,UPS,USB,V,VFC,VICI,VLO,VMC,VNO,VRSK,VRSN,"
-            "VRTX,VTR,VTRS,VZ,WAB,WAL,WAT,WBA,WBD,WDC,WELL,WEN,WES,WFC,WHR,"
-            "WM,WMB,WMT,WNS,WRB,WRK,WST,WTW,WY,WYNN,XEL,XOM,XPO,XYL,YETI,"
-            "YUM,ZBH,ZBRA,ZION,ZTS,"
-            # Nasdaq growth
-            "ABNB,ACAD,ACEL,ACLS,ADBE,ADSK,ADTN,ADVM,AEIS,AFL,AGEN,AGIO,AGYS,"
-            "AKBA,AKRO,AKTS,ALBO,ALEC,ALGT,ALKS,ALLK,ALLO,ALMA,ALNY,ALRM,ALGO,"
-            "AMAG,AMEH,AMED,AMMO,AMOT,AMPH,AMPL,AMRN,AMSC,AMTB,AMWD,AMWL,"
-            "ANAB,ANAC,ANTE,AOSL,APAM,APEI,APLS,APLT,APOG,APPF,APPN,APVO,APYX,"
-            "ARCE,ARCH,ARCT,ARDX,ARGX,ARHS,ARIS,ARLO,ARMP,ARNC,AROC,ARQT,ARRY,"
-            "ARTL,ARTW,ARWR,ASAI,ASLE,ASO,ASRT,ASRV,ASST,ASTC,ASTS,ASUR,ASYS,"
-            "ATAI,ATEC,ATER,ATEX,ATLC,ATNI,ATOM,ATRI,ATSG,ATXI,ATXS,AUTO,AVAH,"
-            "AVDL,AVEO,AVGO,AVGR,AVID,AVIR,AVNW,AVNS,AVPT,AVRO,AVTA,AVTE,AVTR,"
-            "AVXL,AWRE,AXDX,AXGN,AXNX,AXSM,AXTA,AXTI,AZEK,AZPN,BAND,BATRA,"
-            "BATRK,BBIO,BBSI,BCEL,BCEI,BCOV,BCPC,BEEM,BELFA,BELFB,BGNE,BIDU,"
-            "BILL,BIOL,BIRD,BJRI,BKSC,BKTI,BLBD,BLCO,BLDP,BLFS,BLKB,BLMN,"
-            "BLND,BLNK,BLPH,BLRX,BLTE,BLUE,BMBL,BMRN,BMTC,BNTX,BODY,BOKF,"
-            "BOLT,BORR,BOSC,BOOT,BRBR,BREW,BRKL,BRKR,BRPH,BSIG,BSRR,BSVN,"
-            "BTBT,BUSE,BYFC,BYND,BZFD,CALM,CALX,CAMT,CARA,CARE,CARG,CAVE,"
-            "CBIO,CBMG,CBTX,CCEP,CCNE,CCOI,CDLX,CDMO,CDNA,CDRE,CDTX,CDXS,"
-            "CECO,CELH,CELU,CENN,CENT,CEQP,CERE,CERS,CEVA,CFLT,CGEN,CHCO,"
-            "CHDN,CHEF,CHGG,CHKP,CHRD,CHUY,CIGI,CIFR,CLBT,CLCO,CLDT,CLFD,"
-            "CLGN,CLIR,CLLS,CLMT,CLNE,CLPS,CLPT,CLRB,CLS,CLSK,CLVT,CLXT,"
-            "CMCO,CMO,CMPO,CMPR,CMPS,CMRX,CMTG,CNCE,CNDT,CNHI,CNMD,CNOB,"
-            "CNSL,CNSP,CNST,COIN,COKE,COLB,COLL,CONN,COOP,CORR,CORT,COSM,"
-            "CPIX,CPNG,CPRI,CPSI,CRAI,CRBU,CRCT,CRDF,CRDO,CREG,CRMT,CRNT,"
-            "CRNX,CRSP,CRSR,CRTX,CRWD,CSBR,CSGS,CSIQ,CSOD,CSPI,CSSE,CSTL,"
-            "CTBI,CTOS,CTRI,CTSO,CUDA,CURI,CURO,CURV,CUTR,CVAC,CVBF,CVCO,"
-            "CVET,CVGW,CVLG,CVNA,CWCO,CXAI,CXDO,CYCN,CZFS,DCOM,DDOG,DFIN,"
-            "DGII,DIOD,DMRC,DNOW,DORM,DXPE,EVER,EVGO,EVLO,EVLV,EVOP,EVRI,"
-            "EZPW,FARO,FBIZ,FCEL,FCFS,FEIM,FELE,FFBC,FFBH,FFIN,FFNW,FFWM,"
-            "FGEN,FHCO,FIBK,FISI,FIVN,FMNB,FNKO,FNLC,FORG,FORR,FROG,FRGI,"
-            "FRME,FRPT,FRSH,FRST,FRTX,FSBW,FSLY,FSTR,FTDR,FTNT,GABC,GDOT,"
-            "GKOS,GLDD,GLMD,GLPI,GLRE,GMS,GNLN,GNW,GOOD,GOSS,GPMT,GPRE,"
-            "GRBK,GRFS,GRND,GRPH,GRPN,GRTX,GRVY,GRWG,GSBC,GSIT,GTNX,GURE,"
-            "GWRE,HALO,HARP,HEAR,HEP,HIFS,HIHO,HIPO,HIRC,HLLY,HLX,HNNA,"
-            "HOFT,HOLI,HOLX,HOOD,HOOK,HOPB,HPK,HQCL,HRPK,HSKA,HTBK,HTHT,"
-            "HUGE,HVT,HWBK,HWKN,HYLN,IAA,IART,IBCP,IBEX,IBIO,IBKR,ICAD,"
-            "ICON,ICPT,ICUI,IDCC,IDGT,IDXX,IDYA,IEC,IEP,IFRS,IGMS,IGT,IIIV,"
-            "IINO,IIVI,IKT,ILPT,IMAB,IMAC,IMAX,IMBI,IMCC,IMCR,IMGN,IMNM,"
-            "IMNN,IMRX,IMTX,IMUX,IMVT,IMXI,INAB,INBS,INBX,INCY,INDB,INDI,"
-            "INFI,INFU,INGN,INKT,INLX,INMB,INO,INPX,INSE,INSG,INSM,INSP,"
-            "INTZ,INVA,INVE,INVO,INVX,IOSP,IPDN,IPIX,IRBT,IRCP,IRDM,IRMD,"
-            "ISBA,ISSC,ISTR,ITCI,ITGR,ITIC,ITMD,ITOS,ITRI,ITRM,ITRN,ITUS,"
-            "ITVN,IVAC,IVT,IZEA,JAMF,JANX,JBLU,JBSS,JFIN,JHG,JILL,JJSF,"
-            "JKS,JMIA,JOBY,JRSH,KALA,KALV,KALU,KDNY,KFRC,KIDS,KIN,KIRK,"
-            "KLXE,KMDA,KNDI,KNOP,KNSA,KORE,KREF,KRMD,KRTX,KRYS,KSCP,LAKE,"
-            "LARK,LASE,LAUR,LAW,LAZ,LBAI,LBPH,LCID,LCII,LCNB,LCUT,LDI,"
-            "LEGN,LESL,LGND,LGVN,LI,LILA,LILAK,LKFN,LMAT,LMND,LNSR,LNTH,"
-            "LOCO,LOGI,LOPE,LOVE,LPLA,LPRO,LPSN,LPTX,LQDA,LRFC,LSBK,LSCC,"
-            "LSCR,LSTR,LTBR,LTCH,LUCD,LULU,LUNA,LUNG,LYEL,LYTS,LYTX,MAIA,"
-            "MAMO,MARA,MARK,MATW,MBOT,MBUU,MBWM,MCBS,MCFT,MCNB,MCRB,MCRI,"
-            "MDGL,MDNA,MDRR,MDSP,MDVX,MDXG,MEDS,MEIP,MELI,MEOH,MERC,MESA,"
-            "MFIN,MGEE,MGNX,MGPI,MGY,MICT,MIGI,MIMO,MIND,MINM,MIRM,MIST,"
-            "MITK,MKSI,MKTX,MLNK,MLSS,MMAT,MMED,MMSI,MNDO,MNKD,MNMD,MNOV,"
-            "MNRO,MOBI,MOFG,MOGO,MOMO,MORF,MORN,MPLN,MPVD,MPWR,MRCC,MRMD,"
-            "MRSN,MRTN,MRUS,MRVI,MSBI,MSEX,MSGE,MSGN,MSTR,MTBC,MTEM,MTEX,"
-            "MTLS,MTOR,MTRN,MTRX,MTSI,MVBF,MVST,MYMD,MYND,MYPS,MYRG,NABL,"
-            "NATH,NATI,NAVI,NBHC,NBTB,NCBS,NCMI,NCNO,NDLS,NEO,NEOG,NEON,"
-            "NEPH,NETE,NEVI,NEWR,NEXT,NFBK,NFLX,NFNT,NGEN,NGMS,NHWK,NICE,"
-            "NIHD,NKLA,NKTR,NLSN,NLY,NMFC,NMIH,NMRK,NNBR,NNDM,NOVN,NOVT,"
-            "NPCE,NRDS,NREF,NRIX,NRXP,NSA,NSTG,NTCT,NTGR,NTIC,NTST,NUAN,"
-            "NUVA,NUVL,NVAX,NVEI,NVGS,NVIV,NVNI,NVNO,NVOS,NVRI,NVRO,NWBI,"
-            "NWFL,NXGN,NXRT,NXST,NYMT,NYMX,OBDC,OBLG,OBSV,OCFC,OCGN,OCSL,"
-            "OCUP,OFG,OKTA,OLMA,OLPX,OMAB,OMCL,OMGA,ONCT,ONDAS,ONEW,ONLN,"
-            "ONMD,ONON,ONPH,OPBK,OPEN,OPGN,OPHC,OPNT,OPRA,OPRT,OPSN,OPTX,"
-            "ORAN,ORGO,ORPH,OSCR,OSIS,OSPN,OSTK,OSUR,OTEX,OTMO,OVBC,OVID,"
-            "OVLY,OYST,PAAS,PACB,PACK,PACW,PALI,PALT,PANL,PARD,PATI,PAX,"
-            "PAYS,PBFS,PBH,PBPB,PBYI,PCCA,PCCO,PCOR,PCTI,PCYG,PDCO,PDEX,"
-            "PDFS,PDLB,PEGY,PERI,PFBC,PFBI,PFIS,PGNY,PHIC,PHIO,PHMD,PHUN,"
-            "PINE,PINS,PIRS,PKBK,PKOH,PLAB,PLAN,PLBC,PLBY,PLCE,PLUG,PLUS,"
-            "PLXP,POET,POLA,PODD,POWL,PRAA,PRCT,PRDO,PRET,PREX,PRTK,PRTY,"
-            "PRVB,PRVC,PSEC,PSHG,PSNL,PSTL,PTCT,PTIX,PTLO,PTMN,PTSI,PULM,"
-            "PVBC,PWOD,PXLW,PXMD,PYXS,PZZA,QFIN,QMCO,QNST,QUBT,QUIK,QURE,"
-            "RADI,RADN,RAIN,RAPN,RARE,RAVE,RAYA,RBBN,RBLX,RCKT,RCKY,RCML,"
-            "RCMT,RCRT,RDHL,RDIB,RDNT,RDVT,RDWR,REAX,RECT,RELI,RENN,REPX,"
-            "RETO,RFIL,RFND,RGCO,RGEN,RGLD,RGLS,RGNX,RIBT,RICK,RICO,RIGL,"
-            "RILY,RIOT,RLGT,RLJE,RLMD,RMCF,RMNI,RNET,RNLX,RNST,RNWK,ROAD,"
-            "ROCC,ROCK,ROIV,ROVR,RPAY,RPID,RPTX,RRBI,RRGB,RRTS,RSEM,RSVR,"
-            "RTLX,RTRX,RUBY,RUMB,RVNC,RVPH,RVSB,RWLK,RXMD,RXRX,RYAM,SAFE,"
-            "SAFM,SAGE,SAIL,SAMG,SANG,SANM,SASR,SAST,SBCF,SBFG,SBGL,SBNY,"
-            "SBOW,SBRE,SBSI,SBSW,SCHL,SCHN,SCOR,SCPH,SCPS,SCRM,SCSC,SCVL,"
-            "SEAL,SEER,SEMA,SENS,SERV,SFBS,SFNC,SGBX,SGEN,SGHC,SGLY,SGMO,"
-            "SGMT,SGRP,SGRY,SGTX,SHBI,SHCA,SHCR,SHFS,SHLX,SHMD,SHOO,SHPW,"
-            "SIDU,SIEB,SILK,SILV,SILO,SIOX,SIRV,SITM,SJW,SKIL,SKLZ,SLCA,"
-            "SLDB,SLGL,SLNA,SLNO,SLRC,SLRN,SLRX,SLVM,SMBC,SMFL,SMMT,SMMF,"
-            "SMSI,SMTC,SMTI,SNBR,SNCE,SNDA,SNEX,SNGX,SNPO,SNPX,SNSE,SNSR,"
-            "SNST,SNTG,SNUG,SNVS,SODI,SOGP,SOLO,SONM,SONN,SOPA,SOUN,SPFI,"
-            "SPNE,SPNS,SPOK,SPPL,SPRB,SPRC,SPRO,SPRT,SPSC,SPTN,SPWH,SPXC,"
-            "SQNS,SQSP,SREV,SRMX,SRNE,SRPT,SRRK,SRTS,SSBI,SSBT,SSBK,SSFN,"
-            "SSNT,SSRM,SSSS,SSTI,SSYS,STAA,STAF,STBA,STCN,STGW,STIM,STKL,"
-            "STLA,STLC,STNE,STNG,STOK,STPC,STRL,STRN,STRO,STRR,STRS,STRT,"
-            "STSA,STXS,SUMO,SUNN,SUPV,SURG,SWAG,SWAV,SWBI,SWIR,SWKH,SYBT,"
-            "SYBX,SYNH,SYRA,SYTA,TACT,TAIT,TALO,TANH,TAOP,TARA,TBBB,TBBS,"
-            "TBIO,TBLM,TBLT,TBNK,TBPH,TCBC,TCBK,TCBS,TCDA,TCFC,TCMD,TCRR,"
-            "TCRX,TDAC,TDIV,TDOC,TDUP,TELA,TELL,TENK,TENX,TERN,TESS,TGLS,"
-            "TGNA,TGTX,THFF,THGS,THMO,THRY,TIAX,TILS,TIRX,TITN,TLIS,TLGA,"
-            "TLND,TLPH,TLRY,TMDI,TMDX,TMVW,TNYA,TOEM,TOGI,TOKN,TOLS,TOMZ,"
-            "TOPS,TOST,TOWR,TPBK,TPCO,TPIC,TPST,TRAK,TRCA,TRCN,TREE,TRES,"
-            "TRHC,TRIN,TRIP,TRIV,TRMK,TRNS,TRPH,TRPL,TRPX,TRST,TRTX,TRVG,"
-            "TRVN,TSBK,TSEM,TSHA,TSOI,TSRI,TTCF,TTGT,TTOO,TTSH,TUSK,TUYA,"
-            "TWST,TXMD,TXNM,TXPH,TXRH,TYME,UBCP,UBFO,UBOH,UBSI,UCBI,UCTT,"
-            "UDMY,UEIC,ULBI,ULCC,UMBF,UMPQ,UNFI,UNIT,UNTY,UONE,UONEK,UPBD,"
-            "UPHL,UPST,URBN,URGN,USAP,USAT,USBI,USEG,USFD,USIO,USLM,USPH,"
-            "UUUU,UVSP,VABK,VALU,VAXX,VCNX,VCSA,VCTR,VCYT,VECO,VEEV,VERI,"
-            "VERO,VIAV,VICR,VIOT,VIPS,VIRC,VIRI,VISL,VISM,VIST,VITL,VITX,"
-            "VIVK,VIVO,VLRS,VNET,VNRX,VOXX,VRAY,VRCA,VRDN,VREX,VRGX,VRNA,"
-            "VRPX,VSAC,VSCO,VSEC,VSTE,VTGN,VTOL,VTRS,VTSI,VTYX,VUZI,VVOS,"
-            "VXRT,VYGR,VYNT,WABC,WAFD,WAIT,WATT,WCLD,WDAY,WDFC,WEBR,WEGE,"
-            "WERN,WEYS,WFCF,WFRD,WGBS,WINT,WIRE,WISA,WISH,WISP,WKHS,WKME,"
-            "WLFC,WMRD,WNEB,WNNR,WOLF,WOOF,WORX,WRBY,WSBC,WSFS,WSTG,WSTL,"
-            "WTBA,WTFC,WTRG,WULF,WWAC,XBIT,XCUR,XELA,XELB,XENE,XENT,XERS,"
-            "XFOR,XINO,XNCR,XNET,XOMA,XONE,XPEV,XPLR,XPOA,XPOF,XPRO,XRTX,"
-            "XSPA,XTLB,XWEL,XXII,YETI,YGMZ,YMAB,YNDX,YOTA,YRCW,YTEN,YY,"
-            "ZEAL,ZEUS,ZFOX,ZGNX,ZIMV,ZLAB,ZNTH,ZNTL,ZSAN,ZUUS,ZVIA,ZVRA,"
-            "ZYME,ZYXI"
-        )
-        for t in fallback.replace("\n","").split(","):
-            t = t.strip()
-            if t and 1 <= len(t) <= 5 and t.isalpha():
-                tickers.add(t)
-
-    return sorted(tickers)
-
-
-def fetch_single(ticker: str, start_date: str, end_date: str):
-    """Download OHLCV from Stooq for one ticker."""
-    import time, random
-    time.sleep(random.uniform(0.05, 0.15))  # small jitter to avoid rate limits
-    try:
-        s      = start_date.replace("-", "")
-        e      = end_date.replace("-", "")
-        symbol = f"{ticker.lower()}.us"
-        url    = f"{STOOQ_BASE}?s={symbol}&d1={s}&d2={e}&i=d"
-        r      = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+    mapping    = {}
+    page_token = None
+    page       = 0
+    session    = requests.Session()
+ 
+    while True:
+        page += 1
+        params = {
+            "q":        f"'{DRIVE_FOLDER_ID}' in parents and trashed=false",
+            "fields":   "nextPageToken,files(id,name)",
+            "pageSize": 1000,
+            "key":      DRIVE_API_KEY,
+        }
+        if page_token:
+            params["pageToken"] = page_token
+ 
+        try:
+            r = session.get(
+                "https://www.googleapis.com/drive/v3/files",
+                params=params, timeout=30
+            )
+        except Exception as e:
+            st.error(f"Drive API network error: {e}")
+            break
+ 
         if r.status_code != 200:
+            st.error(f"Drive API error {r.status_code}: {r.text[:200]}")
+            break
+ 
+        data  = r.json()
+        files = data.get("files", [])
+ 
+        for f in files:
+            name   = f["name"]
+            fid    = f["id"]
+            ticker = (name
+                      .replace(".us.txt","")
+                      .replace(".us.csv","")
+                      .replace(".txt","")
+                      .replace(".csv","")
+                      .upper()
+                      .replace(".","-"))
+            mapping[ticker] = fid
+ 
+        page_token = data.get("nextPageToken")
+        if not page_token:
+            break
+        import time; time.sleep(0.1)
+ 
+    return mapping
+ 
+ 
+def get_ticker_list():
+    """Return sorted list of all tickers available in Drive."""
+    file_map = get_drive_file_map()
+    return sorted([t for t in file_map.keys() if t and not t.startswith(".")])
+ 
+ 
+def fetch_single(ticker: str, start_date: str, end_date: str):
+    """Download a single ticker CSV from Google Drive."""
+    import time
+    file_map = get_drive_file_map()
+    file_id  = file_map.get(ticker.upper())
+    if file_id is None:
+        return None
+    try:
+        url = f"https://drive.google.com/uc?export=download&id={file_id}"
+        r   = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+        if r.status_code != 200 or len(r.text) < 30:
             return None
-        text = r.text.strip()
-        if len(text) < 30:
+        # Check it's actually CSV data
+        first_line = r.text.splitlines()[0].lower()
+        if "date" not in first_line and "ticker" not in first_line:
             return None
-        bad = ("No data", "Exceeded", "<!DOCTYPE", "<html", "<!doctype", "exceeded")
-        if any(b.lower() in text[:200].lower() for b in bad):
-            return None
-        # Must start with a CSV header line
-        first_line = text.splitlines()[0].lower()
-        if "date" not in first_line:
-            return None
-        df = pd.read_csv(io.StringIO(text))
+        df = pd.read_csv(io.StringIO(r.text))
         if df.empty:
             return None
-        df.columns = [c.strip().title() for c in df.columns]
+        # Strip angle brackets from Stooq headers e.g. <DATE> -> DATE
+        df.columns = [c.strip().upper().replace("<","").replace(">","") for c in df.columns]
+        rename = {}
+        for c in df.columns:
+            if c == "DATE":             rename[c] = "Date"
+            elif c == "OPEN":           rename[c] = "Open"
+            elif c == "HIGH":           rename[c] = "High"
+            elif c == "LOW":            rename[c] = "Low"
+            elif c == "CLOSE":          rename[c] = "Close"
+            elif c in ("VOL","VOLUME"): rename[c] = "Volume"
+        df = df.rename(columns=rename)
         if "Date" not in df.columns or "Close" not in df.columns:
             return None
-        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        df["Date"] = pd.to_datetime(df["Date"].astype(str), format="%Y%m%d", errors="coerce")
         df = df.dropna(subset=["Date"]).set_index("Date").sort_index()
-        if len(df) < 20:
+        df = df[str(start_date):str(end_date)]
+        if df.empty or len(df) < 20:
             return None
         cols = [c for c in ["Open","High","Low","Close","Volume"] if c in df.columns]
         result = df[cols].apply(pd.to_numeric, errors="coerce").dropna(subset=["Close"])
         return result if not result.empty else None
     except Exception:
         return None
-
-
+ 
+ 
 def download_universe(tickers, start_date, end_date, progress_bar=None):
-    """Parallel download of all tickers. Returns (data_dict, found, missing)."""
+    """Parallel download of all tickers from Google Drive."""
     frames  = {c: {} for c in ["Open","High","Low","Close","Volume"]}
     found   = []
     missing = []
     total   = len(tickers)
     done    = [0]
-
+ 
     def _get(t):
         return t, fetch_single(t, start_date, end_date)
-
+ 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = {ex.submit(_get, t): t for t in tickers}
         for fut in as_completed(futures):
@@ -317,20 +176,20 @@ def download_universe(tickers, start_date, end_date, progress_bar=None):
                 found.append(ticker)
             else:
                 missing.append(ticker)
-
+ 
     if not frames["Close"]:
         return {}, found, missing
-
+ 
     result = {}
     for c in ["Open","High","Low","Close","Volume"]:
         if frames[c]:
             result[c] = pd.DataFrame(frames[c]).sort_index()
-
+ 
     return result, found, missing
-
-
+ 
+ 
 def fetch_etf(ticker, start_date, end_date):
-    """Fetch ETF price series, fallback to yfinance."""
+    """Fetch ETF price series from Drive, fallback to yfinance."""
     df = fetch_single(ticker, str(start_date), str(end_date))
     if df is not None and "Close" in df.columns:
         return df["Close"]
@@ -343,13 +202,8 @@ def fetch_etf(ticker, start_date, end_date):
     except Exception:
         pass
     return None
-
-
-# ─────────────────────────────────────────────
-# AUTO-LOAD DATA ON APP START
-# Downloads everything once when the app opens.
-# Stored in st.session_state so all tabs share it.
-# ─────────────────────────────────────────────
+ 
+ 
 def ensure_data_loaded(start_date, end_date):
     """
     Called at the top of every page render.
@@ -360,14 +214,14 @@ def ensure_data_loaded(start_date, end_date):
     key_found  = f"found_{start_date}_{end_date}"
     key_miss   = f"missing_{start_date}_{end_date}"
     key_tickers= "all_tickers"
-
+ 
     # Load ticker list if not cached
     if key_tickers not in st.session_state:
         with st.spinner("Loading ticker universe from NASDAQ directory…"):
             st.session_state[key_tickers] = get_ticker_list()
-
+ 
     all_tickers = st.session_state[key_tickers]
-
+ 
     # Download price data if not cached for this date range
     if key_data not in st.session_state:
         n = len(all_tickers)
@@ -390,15 +244,15 @@ def ensure_data_loaded(start_date, end_date):
             f"✅ Data ready — **{len(found):,}/{n:,}** tickers loaded ({hit:.0f}% hit rate). "
             f"All tabs will use this data."
         )
-
+ 
     return (
         st.session_state[key_tickers],
         st.session_state[key_data],
         st.session_state[key_found],
         st.session_state[key_miss],
     )
-
-
+ 
+ 
 # ─────────────────────────────────────────────
 # BACKTEST ENGINE
 # ─────────────────────────────────────────────
@@ -417,14 +271,14 @@ def run_backtest(data, tickers, params, initial_capital, strategy_mode="atr", pr
     brp = params["base_risk_pct"]
     mnp = params["min_price"]
     rev = params.get("stop_review_bars", 10)
-
+ 
     raw   = []
     close = data.get("Close", pd.DataFrame())
     valid = [t for t in tickers if t in close.columns]
     total = len(valid)
     if total == 0:
         return pd.DataFrame()
-
+ 
     for idx, ticker in enumerate(valid):
         if progress_bar:
             progress_bar.progress((idx+1)/total, text=f"Scanning {ticker}…")
@@ -434,28 +288,28 @@ def run_backtest(data, tickers, params, initial_capital, strategy_mode="atr", pr
             h   = data["High"][ticker].reindex(c.index).ffill()
             lo  = data["Low"][ticker].reindex(c.index).ffill()
             vol = data["Volume"][ticker].reindex(c.index).fillna(0)
-
+ 
             mb = max(bp, ap, s2, vmp) + 10
             if len(c) < mb:
                 continue
-
+ 
             tr     = pd.concat([h-lo, (h-c.shift(1)).abs(), (lo-c.shift(1)).abs()], axis=1).max(axis=1)
             atr    = tr.ewm(span=ap, adjust=False).mean()
             sma200 = c.rolling(s2).mean()
             sma50  = c.rolling(s5).mean()
             volma  = vol.rolling(vmp).mean()
-
+ 
             if strategy_mode == "atr":
                 cbh  = pd.concat([o, c], axis=1).max(axis=1)
                 hb52 = cbh.rolling(bp).max()
             else:
                 hb52 = h.rolling(bp).max()
-
+ 
             in_t  = False
             slvl  = entry = hbh = hba = np.nan
             age   = bsa = pyc = bsr = 0
             high_since_review = np.nan
-
+ 
             for j in range(mb, len(c)):
                 cv = c.iloc[j]; lv = lo.iloc[j]; hv = h.iloc[j]
                 cb = cbh.iloc[j] if strategy_mode == "atr" else hv
@@ -463,23 +317,23 @@ def run_backtest(data, tickers, params, initial_capital, strategy_mode="atr", pr
                 v2 = sma200.iloc[j]; v5 = sma50.iloc[j]
                 vl = vol.iloc[j]; vm = volma.iloc[j]
                 dt = c.index[j]
-
+ 
                 if pd.isna(hb) or pd.isna(av) or pd.isna(v2):
                     continue
-
+ 
                 sd = am * av
                 ok = vm >= mav; vs = vl >= vm * vsm
                 a2 = cv > v2;   a5 = cv > v5; px = cv >= mnp
-
+ 
                 if strategy_mode == "atr":
                     esig = cb >= hb and a2 and a5 and not in_t and vs and ok and px
                 else:
                     esig = hv == hb and a2 and not in_t and vs and ok and px
-
+ 
                 asig = in_t and a2 and hv > hba and bsa >= ms and age < ma and vl > vm and pyc < mp
                 sh   = in_t and lv < slvl
                 te   = in_t and age >= ma
-
+ 
                 if esig:
                     in_t  = True
                     entry = cv; slvl = cv - sd; hbh = cb; hba = hv
@@ -493,7 +347,7 @@ def run_backtest(data, tickers, params, initial_capital, strategy_mode="atr", pr
                         "exit_type": None, "pyramid_adds": 0,
                         "trade_age": 0, "_qty": 0, "_eq": 0.0,
                     })
-
+ 
                 elif sh or te:
                     xp = slvl if sh else cv
                     xt = "Stop" if sh else "TimeExit"
@@ -506,21 +360,21 @@ def run_backtest(data, tickers, params, initial_capital, strategy_mode="atr", pr
                     slvl  = entry = hbh = hba = np.nan
                     age   = bsa = pyc = bsr = 0
                     high_since_review = np.nan
-
+ 
                 elif in_t:
                     age += 1; bsa += 1
-
+ 
                     if strategy_mode == "atr":
                         if cb > hbh: hbh = cb
                         ns = hbh - sd
                         if ns > slvl: slvl = ns
                         if asig: hba = hv; bsa = 0; pyc += 1
                         elif hv > hba: hba = hv
-
+ 
                     elif strategy_mode == "mtp":
                         if asig: slvl = cv - sd; hba = hv; bsa = 0; pyc += 1
                         elif hv > hba: hba = hv
-
+ 
                     elif strategy_mode == "10bar":
                         bsr += 1
                         if hv > high_since_review: high_since_review = hv
@@ -534,26 +388,26 @@ def run_backtest(data, tickers, params, initial_capital, strategy_mode="atr", pr
                                 if ns > slvl: slvl = ns
                             bsr = 0; high_since_review = hv
                         if not asig and hv > hba: hba = hv
-
+ 
         except Exception:
             continue
-
+ 
     raw = [s for s in raw if s["exit_date"] is not None]
     if not raw:
         return pd.DataFrame()
-
+ 
     LEVERAGE = 2.0
     raw.sort(key=lambda x: (x["entry_date"], -x.get("rel_vol", 0)))
     eq = float(initial_capital); bp_ = eq * LEVERAGE
     open_ = {}; trades = []; taken = set()
-
+ 
     all_dates = sorted(set([s["entry_date"] for s in raw] + [s["exit_date"] for s in raw]))
     by_entry  = defaultdict(list)
     by_exit   = defaultdict(list)
     for s in raw:
         by_entry[s["entry_date"]].append(s)
         by_exit[s["exit_date"]].append(s)
-
+ 
     for dt in all_dates:
         for s in by_exit[dt]:
             if id(s) not in taken: continue
@@ -575,7 +429,7 @@ def run_backtest(data, tickers, params, initial_capital, strategy_mode="atr", pr
             open_.pop(s["ticker"], 0)
             eq  = max(eq + pnl, 1.0)
             used = sum(open_.values()); bp_ = max(eq * LEVERAGE - used, 0.0)
-
+ 
         for s in by_entry[dt]:
             sd = s["stop_dist"]
             if sd <= 0 or pd.isna(sd) or s["ticker"] in open_: continue
@@ -584,11 +438,11 @@ def run_backtest(data, tickers, params, initial_capital, strategy_mode="atr", pr
             if need > bp_: continue
             taken.add(id(s)); s["_qty"] = qty; s["_eq"] = eq
             open_[s["ticker"]] = need; bp_ -= need
-
+ 
     trades.sort(key=lambda x: x["exit_date"])
     return pd.DataFrame(trades)
-
-
+ 
+ 
 # ─────────────────────────────────────────────
 # METRICS
 # ─────────────────────────────────────────────
@@ -637,8 +491,8 @@ def compute_metrics(df, initial_capital, start_date, end_date):
         "Expectancy":    f"{exp:.2f}%",
         "_cagr": cagr, "_sharpe": sh, "_calmar": cal, "_maxdd": mdd, "_pf": pf,
     }, equity, dd
-
-
+ 
+ 
 # ─────────────────────────────────────────────
 # BENCHMARKS
 # ─────────────────────────────────────────────
@@ -657,7 +511,7 @@ def compute_dca(ticker, initial_capital, monthly, start_date, end_date):
             shares += monthly / prices.iloc[i]; last_m = dt.month
         eq.iloc[i] = shares * prices.iloc[i]
     return eq
-
+ 
 def add_monthly(equity, monthly):
     if monthly <= 0: return equity
     eq = equity.copy().astype(float); last_m = eq.index[0].month; cum = 0.0
@@ -665,13 +519,13 @@ def add_monthly(equity, monthly):
         if dt.month != last_m: cum += monthly; last_m = dt.month
         eq.iloc[i] += cum
     return eq
-
-
+ 
+ 
 # ─────────────────────────────────────────────
 # CHARTS
 # ─────────────────────────────────────────────
 COLORS = {"atr": "#00e5b3", "mtp": "#4a90d9", "10bar": "#f5a623", "qqq": "#a855f7", "spy": "#6b7fa3"}
-
+ 
 def chart_comparison(results, qqq=None, spy=None, monthly=0):
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.72, 0.28], vertical_spacing=0.03)
     names = {"atr": "S1: ATR Trailing", "mtp": "S2: MTP Static", "10bar": "S3: 10-Bar Static"}
@@ -695,7 +549,7 @@ def chart_comparison(results, qqq=None, spy=None, monthly=0):
     fig.update_yaxes(title_text="Portfolio ($)", row=1, col=1)
     fig.update_yaxes(title_text="Drawdown (%)", row=2, col=1)
     return fig
-
+ 
 def chart_annual(equity, color, name):
     ann    = equity.resample("YE").last().pct_change().dropna() * 100
     colors = [color if v >= 0 else "#ff5555" for v in ann.values]
@@ -706,7 +560,7 @@ def chart_annual(equity, color, name):
     fig.update_xaxes(gridcolor="#141b2d")
     fig.update_yaxes(gridcolor="#141b2d", zeroline=True, zerolinecolor="#2a3550")
     return fig
-
+ 
 def chart_dist(df, color, name):
     if df.empty: return go.Figure()
     fig = px.histogram(df, x="pnl_pct", nbins=60, color_discrete_sequence=[color],
@@ -715,15 +569,15 @@ def chart_dist(df, color, name):
         font=dict(color="#e8eaf0"), margin=dict(l=0,r=0,t=30,b=0), height=280, title_font=dict(color=color))
     fig.update_xaxes(gridcolor="#141b2d"); fig.update_yaxes(gridcolor="#141b2d")
     return fig
-
+ 
 def mc(label, value, pos_good=True, color=None):
     neg = isinstance(value, str) and value.startswith("-")
     if color:
         return f'<div class="metric-card"><div class="metric-label">{label}</div><div class="metric-value" style="color:{color}">{value}</div></div>'
     css = ("negative" if pos_good else "positive") if neg else ("positive" if pos_good else "negative")
     return f'<div class="metric-card"><div class="metric-label">{label}</div><div class="metric-value {css}">{value}</div></div>'
-
-
+ 
+ 
 # ─────────────────────────────────────────────
 # OPTIMIZER
 # ─────────────────────────────────────────────
@@ -750,14 +604,14 @@ def suggest(space, past, n_start=10):
             n     = int(round((val-lo)/step))
             p[k]  = round(lo + n*step, 4)
     return p
-
-
+ 
+ 
 # ─────────────────────────────────────────────
 # SIDEBAR
 # ─────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## ⚙️ Settings")
-
+ 
     with st.expander("📊 Data", expanded=True):
         c1, c2 = st.columns(2)
         with c1: start_date = st.date_input("Start", datetime(1995, 1, 1))
@@ -765,14 +619,14 @@ with st.sidebar:
         initial_capital      = st.number_input("Capital ($)", min_value=1000, value=10000, step=1000)
         monthly_contribution = st.number_input("Monthly Add ($)", min_value=0, value=500, step=100)
         st.caption("Data auto-loads on first open and is shared across all tabs.")
-
+ 
     with st.expander("🔀 Strategies", expanded=True):
         run_s1   = st.toggle("S1 — ATR Trailing Stop",  value=True)
         run_s2   = st.toggle("S2 — MTP Static Stop",    value=True)
         run_s3   = st.toggle("S3 — 10-Bar Static Stop", value=True)
         show_qqq = st.toggle("Show QQQ benchmark",      value=True)
         show_spy = st.toggle("Show SPY benchmark",       value=True)
-
+ 
     with st.expander("🎯 Parameters", expanded=True):
         breakout_period  = st.number_input("52W Lookback",           10,  504,  252)
         atr_period       = st.number_input("ATR Period",             1,   500,  293)
@@ -782,42 +636,42 @@ with st.sidebar:
         max_age          = st.number_input("Max Trade Age (bars)",   10,  2000, 584)
         base_risk_pct    = st.number_input("Risk % per Trade",       0.1, 10.0, 2.0,  step=0.25)
         stop_review_bars = st.number_input("Stop Review Bars (S3)",  1,   50,   10)
-
+ 
     with st.expander("📈 Moving Averages", expanded=True):
         sma200 = st.number_input("Trend SMA",   1, 500, 200)
         sma50  = st.number_input("Context SMA", 1, 300, 50)
-
+ 
     with st.expander("🔊 Volume"):
         vol_ma_period  = st.number_input("Volume MA Period",    5,  100,        20)
         vol_spike_mult = st.number_input("Vol Spike Mult",      1.0, 5.0,       1.5, step=0.1)
         min_avg_vol    = st.number_input("Min Avg Volume",      0,   10_000_000, 1_000_000, step=100_000)
-
+ 
     with st.expander("🔍 Price"):
         min_price = st.number_input("Min Price ($)", 0.0, 500.0, 10.0, step=0.5)
-
+ 
     st.markdown("---")
     run_btn = st.button("🚀 Run Comparison")
-
-
+ 
+ 
 # ─────────────────────────────────────────────
 # AUTO-LOAD DATA (runs every page render)
 # ─────────────────────────────────────────────
 st.markdown("# 📈 Stock Trend Trader — Strategy Comparison")
 st.markdown("*ATR Trailing · MTP Static · 10-Bar Static · vs QQQ & SPY*")
 st.markdown("---")
-
+ 
 all_tickers, data, found, missing = ensure_data_loaded(start_date, end_date)
-
+ 
 if found:
     st.caption(f"📂 **{len(found):,}** tickers loaded from Stooq ({start_date} → {end_date}) — ready to backtest")
-
-
+ 
+ 
 # ─────────────────────────────────────────────
 # TABS
 # ─────────────────────────────────────────────
 main_tab1, main_tab2 = st.tabs(["📊 Strategy Comparison", "🔬 Optimization"])
-
-
+ 
+ 
 # ══════════════════════════════════════════
 # TAB 1 — COMPARISON
 # ══════════════════════════════════════════
@@ -842,15 +696,15 @@ Stop reviews every N bars. Only updates if new high made in that window.""")
         if run_s1: active.append("atr")
         if run_s2: active.append("mtp")
         if run_s3: active.append("10bar")
-
+ 
         if not active:
             st.error("Select at least one strategy.")
             st.stop()
-
+ 
         if not data:
             st.error("No data loaded. Check your internet connection and reload the page.")
             st.stop()
-
+ 
         params = {
             "breakout_period":  breakout_period,
             "atr_period":       atr_period,
@@ -867,14 +721,14 @@ Stop reviews every N bars. Only updates if new high made in that window.""")
             "min_price":        min_price,
             "stop_review_bars": stop_review_bars,
         }
-
+ 
         st.info(f"**{len(found):,} tickers** | **{len(active)} strategies** | {start_date} → {end_date}")
-
+ 
         mode_names  = {"atr": "S1: ATR Trailing", "mtp": "S2: MTP Static", "10bar": "S3: 10-Bar Static"}
         mode_colors = {"atr": COLORS["atr"], "mtp": COLORS["mtp"], "10bar": COLORS["10bar"]}
-
+ 
         all_results = {}; all_metrics = {}; all_trades = {}
-
+ 
         for mode in active:
             with st.spinner(f"Running {mode_names[mode]}…"):
                 prog   = st.progress(0, text=f"Scanning for {mode_names[mode]}…")
@@ -887,11 +741,11 @@ Stop reviews every N bars. Only updates if new high made in that window.""")
             all_results[mode] = (equity, drawdown)
             all_metrics[mode] = metrics
             all_trades[mode]  = trades
-
+ 
         if not all_results:
             st.warning("No results for any strategy.")
             st.stop()
-
+ 
         qqq_eq = spy_eq = None
         if show_qqq:
             with st.spinner("Loading QQQ…"):
@@ -899,18 +753,18 @@ Stop reviews every N bars. Only updates if new high made in that window.""")
         if show_spy:
             with st.spinner("Loading SPY…"):
                 spy_eq = compute_dca("SPY", initial_capital, monthly_contribution, start_date, end_date)
-
+ 
         st.markdown('<div class="section-header">📈 Equity Curve Comparison</div>', unsafe_allow_html=True)
         st.plotly_chart(chart_comparison(all_results, qqq_eq, spy_eq, monthly_contribution), use_container_width=True)
-
+ 
         n_months = (pd.to_datetime(end_date) - pd.to_datetime(start_date)).days / 30.44
         total_in = initial_capital + monthly_contribution * n_months
         st.caption(f"Total contributed: **${total_in:,.0f}** (${initial_capital:,} initial + ${monthly_contribution:,}/mo)")
-
+ 
         all_cols = list(all_results.keys())
         if show_qqq and qqq_eq is not None: all_cols.append("qqq")
         if show_spy and spy_eq is not None: all_cols.append("spy")
-
+ 
         cols = st.columns(len(all_cols))
         for i, key in enumerate(all_cols):
             with cols[i]:
@@ -921,7 +775,7 @@ Stop reviews every N bars. Only updates if new high made in that window.""")
                 else:
                     final = add_monthly(all_results[key][0], monthly_contribution).iloc[-1]
                     st.markdown(mc(f"{mode_names[key]} Final", f"${final:,.0f}", color=mode_colors[key]), unsafe_allow_html=True)
-
+ 
         st.markdown('<div class="section-header">📊 Performance Metrics</div>', unsafe_allow_html=True)
         metric_keys = ["CAGR","Sharpe","Calmar","Max Drawdown","Total Trades","Win Rate","Profit Factor","Expectancy"]
         pos_good    = [True, True, True, False, True, True, True, True]
@@ -931,19 +785,19 @@ Stop reviews every N bars. Only updates if new high made in that window.""")
                 st.markdown(f'<div style="color:{mode_colors[mode]};font-weight:700;font-size:1rem;margin-bottom:8px">{mode_names[mode]}</div>', unsafe_allow_html=True)
                 for mk, pg in zip(metric_keys, pos_good):
                     st.markdown(mc(mk, metrics[mk], pg), unsafe_allow_html=True)
-
+ 
         st.markdown('<div class="section-header">📅 Annual Returns</div>', unsafe_allow_html=True)
         cols = st.columns(len(all_results))
         for i, (mode, (equity, _)) in enumerate(all_results.items()):
             with cols[i]:
                 st.plotly_chart(chart_annual(equity, mode_colors[mode], mode_names[mode]), use_container_width=True)
-
+ 
         st.markdown('<div class="section-header">📦 Trade Distribution</div>', unsafe_allow_html=True)
         cols = st.columns(len(all_results))
         for i, (mode, trades) in enumerate(all_trades.items()):
             with cols[i]:
                 st.plotly_chart(chart_dist(trades, mode_colors[mode], mode_names[mode]), use_container_width=True)
-
+ 
         st.markdown('<div class="section-header">📋 Trade Logs</div>', unsafe_allow_html=True)
         trade_tabs = st.tabs([mode_names[m] for m in all_trades.keys()])
         for tab, (mode, trades) in zip(trade_tabs, all_trades.items()):
@@ -956,8 +810,8 @@ Stop reviews every N bars. Only updates if new high made in that window.""")
                 st.dataframe(ddf, use_container_width=True, height=350)
                 st.download_button(f"⬇️ Download {mode_names[mode]}",
                     ddf.to_csv(index=False), f"trades_{mode}.csv", "text/csv")
-
-
+ 
+ 
 # ══════════════════════════════════════════
 # TAB 2 — OPTIMIZATION
 # Uses the same already-loaded data — no re-download
@@ -968,12 +822,12 @@ with main_tab2:
     Uses the same data already loaded on startup — no extra downloads needed.
     Run multiple times with different metrics, then find your middle ground manually.
     </div>""", unsafe_allow_html=True)
-
+ 
     oc1, oc2, oc3 = st.columns(3)
     with oc1: opt_metric   = st.selectbox("Optimize For", ["Calmar","Sharpe","CAGR","Profit Factor"])
     with oc2: opt_strategy = st.selectbox("Strategy", ["S1: ATR Trailing","S2: MTP Static","S3: 10-Bar Static"])
     with oc3: n_trials     = st.number_input("Trials", 5, 200, 30, step=5)
-
+ 
     st.markdown("#### Search Ranges")
     sr1, sr2 = st.columns(2)
     with sr1:
@@ -988,22 +842,22 @@ with main_tab2:
         s5_r = st.slider("Context SMA",           20,   100,  (40, 70),  step=5)
         vs_r = st.slider("Vol Spike Mult",         1.0,  3.0,  (1.2, 2.0), step=0.1)
         br_r = st.slider("Base Risk %",            0.5,  5.0,  (1.0, 3.5), step=0.25)
-
+ 
     oc4, oc5 = st.columns(2)
     with oc4: opt_start = st.date_input("Start", datetime(2005, 1, 1), key="os")
     with oc5: opt_end   = st.date_input("End",   datetime.today(),     key="oe")
     opt_cap = st.number_input("Capital ($)", 1000, 10_000_000, 10000, step=1000, key="oc")
-
+ 
     run_opt = st.button("🚀 Run Optimization")
-
+ 
     if run_opt:
         opt_mode_map = {"S1: ATR Trailing":"atr","S2: MTP Static":"mtp","S3: 10-Bar Static":"10bar"}
         opt_mode     = opt_mode_map[opt_strategy]
-
+ 
         if not data or not found:
             st.error("No data loaded. Reload the page.")
             st.stop()
-
+ 
         # Filter data to the optimization date range
         opt_data = {}
         for c in ["Open","High","Low","Close","Volume"]:
@@ -1012,14 +866,14 @@ with main_tab2:
                 if not filtered.empty:
                     opt_data[c] = filtered
         opt_found = [t for t in found if t in opt_data.get("Close", pd.DataFrame()).columns]
-
+ 
         st.success(f"Using **{len(opt_found):,}** tickers already in memory. Starting {n_trials} trials…")
-
+ 
         score_map = {"Calmar":"_calmar","Sharpe":"_sharpe","CAGR":"_cagr","Profit Factor":"_pf"}
         sort_map  = {"Calmar":"Calmar","Sharpe":"Sharpe","CAGR":"CAGR%","Profit Factor":"Profit Factor"}
         skey = score_map[opt_metric]
         scol = sort_map[opt_metric]
-
+ 
         space = {
             "breakout_period": (bp_r[0], bp_r[1], 10,   "int"),
             "atr_period":      (ap_r[0], ap_r[1], 5,    "int"),
@@ -1038,17 +892,17 @@ with main_tab2:
             "min_price":        min_price,
             "stop_review_bars": stop_review_bars,
         }
-
+ 
         results = []; past = []; best_s = -np.inf; best_t = None
         tbl  = st.empty()
         prog = st.progress(0, text="Starting…")
-
+ 
         for n in range(1, n_trials+1):
             prog.progress(n/n_trials, text=f"Trial {n}/{n_trials} | Best {opt_metric}: {best_s:.4f}")
             tp  = suggest(space, past)
             fp  = {**tp, **fixed}
             tdf = run_backtest(opt_data, opt_found, fp, opt_cap, opt_mode)
-
+ 
             if tdf.empty:
                 score = -999.0
                 row   = {"trial": n, **{k: tp[k] for k in space},
@@ -1065,18 +919,18 @@ with main_tab2:
                            "Max DD%":       round(m["_maxdd"]*100, 2),
                            "Win Rate%":     float(m["Win Rate"].replace("%","")),
                            "Trades":        m["Total Trades"]}
-
+ 
             past.append({"params": tp, "score": score})
             results.append(row)
             if score > best_s: best_s = score; best_t = row.copy()
-
+ 
             if n % 3 == 0 or n == n_trials:
                 tbl.dataframe(pd.DataFrame(results).sort_values(scol, ascending=False),
                               use_container_width=True, height=400)
-
+ 
         prog.empty()
         st.markdown(f"---\n### ✅ Done — Best {opt_metric}: **{best_s:.4f}**")
-
+ 
         if best_t:
             st.markdown(f"#### 🏆 Best Trial — {opt_strategy}")
             bc1, bc2, bc3, bc4 = st.columns(4)
@@ -1092,7 +946,7 @@ with main_tab2:
             with bc4:
                 st.markdown(mc("Trades", str(best_t["Trades"])), unsafe_allow_html=True)
             st.dataframe(pd.DataFrame([{k: best_t[k] for k in space}]), use_container_width=True)
-
+ 
         final = pd.DataFrame(results).sort_values(scol, ascending=False).reset_index(drop=True)
         final.index += 1
         st.markdown("#### All Trials")
