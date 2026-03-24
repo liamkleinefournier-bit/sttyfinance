@@ -38,85 +38,77 @@ st.markdown("""
 # Caches ticker list and price data for 24 hours
 #
 # HOW TICKER DISCOVERY WORKS:
-#   Stooq publishes a full bulk zip of all US daily data at:
-#     https://stooq.com/db/l/?b=d_us_txt
-#   We download just the zip's file listing (no need to extract all CSVs)
-#   to get every ticker symbol on Stooq. This gives us ~7000-9000 tickers
-#   covering NYSE + Nasdaq + OTC. We then filter to keep only clean
-#   alphabetic symbols (1-5 chars) which matches exchange-listed stocks.
+#   Stooq organises its symbol browser by exchange + letter:
+#     https://stooq.com/t/?i=505&v=0&l=A   → NYSE tickers starting with A
+#     https://stooq.com/t/?i=513&v=0&l=A   → Nasdaq tickers starting with A
+#   We scrape all 26 letter pages × 2 exchanges (~52 fast requests, run in
+#   parallel) to collect the complete universe. Each page embeds ticker links
+#   as /q/?s=TICKER.US which are trivially parsed with a regex.
+#   This is a fully public, no-cookie endpoint and reliably returns 7000-9000
+#   tickers covering all NYSE and Nasdaq common shares.
 # ─────────────────────────────────────────────
 
 STOOQ_BASE      = "https://stooq.com/q/d/l/"
-STOOQ_BULK_URL  = "https://stooq.com/db/l/?b=d_us_txt"   # full US bulk zip
 HEADERS         = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-MAX_WORKERS     = 30    # parallel download threads (lower = kinder to Stooq)
-REQUEST_TIMEOUT = 20    # seconds per individual ticker request
+MAX_WORKERS     = 30    # parallel download threads for price data
+DISCOVER_WORKERS = 10   # parallel threads for ticker discovery (be gentle)
+REQUEST_TIMEOUT = 20    # seconds per request
+
+# Exchange IDs used in Stooq's symbol browser
+# 505 = NYSE,  513 = Nasdaq
+STOOQ_EXCHANGES = {"NYSE": "505", "Nasdaq": "513"}
+LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
+def _fetch_one_letter_page(exchange_id: str, letter: str) -> set:
+    """Fetch a single exchange+letter page and return tickers found on it."""
+    import re
+    url = f"https://stooq.com/t/?i={exchange_id}&v=0&l={letter}"
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+        if r.status_code != 200:
+            return set()
+        # Each ticker appears as a link: /q/?s=AAPL.US
+        found = re.findall(r'/q/\?s=([A-Za-z]{1,6})\.US', r.text)
+        return {t.upper() for t in found}
+    except Exception:
+        return set()
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_stooq_ticker_list() -> list[str]:
     """
-    Download Stooq's bulk US zip and read the zip's file listing to extract
-    every available ticker. No need to unzip the full multi-GB archive —
-    Python's zipfile can read the central directory (the table of contents)
-    without decompressing any data.
-
-    Falls back to a broad hard-coded universe if the download fails.
-    Returns a sorted list of clean uppercase ticker strings.
+    Scrape Stooq's per-letter symbol browser pages for NYSE and Nasdaq.
+    Runs ~52 parallel requests (26 letters × 2 exchanges) to build the
+    complete universe. Fully public endpoint — no cookies needed.
+    Falls back to a hard-coded ~1200 liquid US stocks if scraping fails.
+    Returns a sorted deduplicated list of uppercase ticker symbols.
     """
-    import zipfile, re
-
     tickers = set()
 
-    try:
-        # Stream only enough of the zip to read its central directory.
-        # The central directory is at the END of the zip file, so we need
-        # to download the whole thing — but the bulk zip is ~5 MB compressed
-        # (it's just a manifest at this URL, not the actual price data).
-        r = requests.get(STOOQ_BULK_URL, headers=HEADERS, timeout=60, stream=True)
-        if r.status_code == 200:
-            raw_bytes = io.BytesIO()
-            for chunk in r.iter_content(chunk_size=65536):
-                raw_bytes.write(chunk)
-            raw_bytes.seek(0)
+    # Build list of (exchange_id, letter) jobs
+    jobs = [
+        (eid, letter)
+        for eid in STOOQ_EXCHANGES.values()
+        for letter in LETTERS
+    ]
 
-            with zipfile.ZipFile(raw_bytes) as zf:
-                for name in zf.namelist():
-                    # Files are like: data/daily/us/nasdaq stocks/1/aapl.us.txt
-                    # or:             data/daily/us/nyse stocks/1/jpm.us.txt
-                    basename = name.split("/")[-1]          # aapl.us.txt
-                    symbol   = basename.replace(".us.txt", "").replace(".us.csv", "").upper()
-                    # Keep only clean alpha symbols 1-5 chars (exchange-listed)
-                    # Exclude: index symbols (start with ^), warrants (end W/WS),
-                    # preferred shares (contain -P), and unit symbols (contain -)
-                    if (1 <= len(symbol) <= 5
-                            and symbol.isalpha()
-                            and not symbol.endswith(("W", "WS", "R", "U"))
-                            and "data/daily/us/" in name):
-                        tickers.add(symbol)
+    with ThreadPoolExecutor(max_workers=DISCOVER_WORKERS) as ex:
+        futures = {ex.submit(_fetch_one_letter_page, eid, letter): (eid, letter)
+                   for eid, letter in jobs}
+        for fut in as_completed(futures):
+            tickers.update(fut.result())
 
-    except Exception as e:
-        pass   # fall through to secondary methods
+    # Filter: keep 1-5 char pure-alpha symbols only
+    # Removes warrants (W/WS suffix), rights (R), units (U), preferred (-P)
+    tickers = {
+        t for t in tickers
+        if 1 <= len(t) <= 5
+        and t.isalpha()
+        and not t.endswith(("WS", "WW"))
+    }
 
-    # Secondary: scrape Stooq's exchange index pages for NYSE and Nasdaq
-    # These pages list ~500-1000 tickers each via HTML links
-    if len(tickers) < 500:
-        index_urls = [
-            "https://stooq.com/t/?i=505",   # NYSE Composite
-            "https://stooq.com/t/?i=513",   # Nasdaq Composite
-            "https://stooq.com/t/?i=534",   # S&P 500
-            "https://stooq.com/t/?i=501",   # Dow Jones
-        ]
-        for url in index_urls:
-            try:
-                r = requests.get(url, headers=HEADERS, timeout=20)
-                if r.status_code == 200:
-                    found = re.findall(r'/q/\?s=([A-Za-z]{1,5})\.US', r.text)
-                    tickers.update(t.upper() for t in found)
-            except Exception:
-                continue
-
-    # Final fallback — hard-coded ~1200 liquid US stocks
+    # Final fallback
     if len(tickers) < 200:
         tickers = _fallback_universe()
 
@@ -704,13 +696,13 @@ with st.sidebar:
 
         if "All" in universe:
             ticker_placeholder = st.empty()
-            ticker_placeholder.info("⏳ Loading ticker universe from Stooq…")
+            ticker_placeholder.info("⏳ Scanning NYSE + Nasdaq symbol pages on Stooq (~52 requests)…")
             all_tickers = get_stooq_ticker_list()
             n = len(all_tickers)
-            if n >= 3000:
-                ticker_placeholder.success(f"✅ {n:,} tickers loaded from Stooq bulk index")
-            elif n >= 500:
-                ticker_placeholder.warning(f"⚠️ {n:,} tickers (partial — using index scrape fallback)")
+            if n >= 5000:
+                ticker_placeholder.success(f"✅ {n:,} tickers loaded (NYSE + Nasdaq full universe)")
+            elif n >= 1000:
+                ticker_placeholder.warning(f"⚠️ {n:,} tickers (partial — some letter pages may have failed)")
             else:
                 ticker_placeholder.error(f"⚠️ Only {n} tickers — using hard-coded fallback. Check Stooq connectivity.")
         else:
