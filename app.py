@@ -5,10 +5,10 @@ import requests
 import io
 from datetime import datetime
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -34,453 +34,278 @@ st.markdown("""
 
 # ─────────────────────────────────────────────
 # STOOQ DATA LAYER
-# Direct connection to stooq.com — no API key
-# Price data fetched per-ticker, cached 24 hours
-#
-# UNIVERSE: Embedded ~7,500 NYSE + Nasdaq common shares.
-# No scraping or discovery network call needed — the list is compiled
-# from S&P 500, S&P 400, S&P 600, Russell 1000, Russell 2000,
-# Nasdaq 100, and broader exchange constituents.
 # ─────────────────────────────────────────────
-
 STOOQ_BASE      = "https://stooq.com/q/d/l/"
-HEADERS         = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+HEADERS         = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 MAX_WORKERS     = 30
 REQUEST_TIMEOUT = 20
 
-# ── Complete NYSE + Nasdaq common stock universe ──
-# S&P 500 + S&P 400 MidCap + S&P 600 SmallCap + Russell extensions
-_UNIVERSE = (
-    "A,AA,AAL,AAON,AAP,AAPL,ABBV,ABC,ABCB,ABG,ABM,ABMD,ABR,ABT,ABUS,AC,ACAD,"
-    "ACGL,ACM,ACN,ACNB,ACVA,ADBE,ADI,ADM,ADNT,ADP,ADSK,ADTN,ADV,ADVM,AEE,"
-    "AEL,AEO,AEP,AER,AES,AFL,AGIO,AGCO,AGM,AGO,AGR,AGS,AGYS,AIG,AIRC,AIT,"
-    "AIZ,AJG,AKAM,AKR,AL,ALB,ALC,ALE,ALGN,ALK,ALLE,ALLY,ALNY,ALSN,ALT,ALTM,"
-    "ALTR,ALUS,AM,AMAG,AMCR,AME,AMED,AMG,AMGN,AMH,AMP,AMR,AMRK,AMT,AMTD,AN,"
-    "ANET,ANF,ANH,ANIK,ANIP,ANSS,AON,AOS,APA,APD,APG,APH,APLE,APPF,APPN,APR,"
-    "APTV,AR,ARC,ARCB,ARCH,ARCO,ARE,ARKO,ARL,ARLO,ARNC,AROC,AROW,ARW,ARWR,"
-    "ASB,ASGN,ASH,ASIS,ASO,ASRT,ASTE,ASX,AT,ATAX,ATI,ATLC,ATN,ATNI,ATR,ATUS,"
-    "ATW,ATXI,AUTO,AUY,AVA,AVB,AVGO,AVT,AVY,AWH,AWK,AXON,AX,AXE,AXP,AYI,AZO,"
-    "AZZ,B,BA,BANC,BAC,BAH,BAK,BALL,BANF,BANR,BAP,BAX,BBIO,BBSI,BBWI,BBY,"
-    "BC,BCC,BCEI,BCO,BCPC,BCPN,BDC,BDN,BDX,BE,BECN,BELFA,BELFB,BEN,BFT,BGFV,"
-    "BGNE,BHB,BHLB,BIG,BIIB,BIO,BIOL,BJRI,BKD,BKEP,BKI,BKNG,BKSC,BL,BLDR,"
-    "BLKB,BLMN,BLW,BMI,BMS,BMY,BN,BNL,BOKF,BOLT,BOOM,BOOT,BORR,BOSC,BPMC,"
-    "BPT,BR,BRBR,BRDG,BREW,BRG,BRKL,BRKR,BRN,BRT,BRTS,BSX,BTU,BUR,BVS,BWA,"
-    "BWXT,BXP,BXMT,C,CAAP,CABO,CAC,CACC,CACI,CAKE,CAL,CALM,CALX,CAMT,CAR,"
-    "CARG,CARS,CASY,CAT,CATO,CATY,CAVE,CBFV,CBNK,CBOE,CBRE,CBRL,CBTX,CC,"
-    "CCEP,CCK,CCL,CDK,CDW,CE,CEG,CENX,CF,CFG,CFLT,CFR,CFRX,CGC,CHD,CHE,"
-    "CHDN,CHEF,CHGG,CHKP,CHK,CHRD,CHTR,CHUY,CI,CIEN,CINF,CIR,CIVI,CL,CLF,"
-    "CLH,CLM,CLR,CLVT,CLX,CMA,CMCSA,CMC,CME,CMG,CMI,CMS,CNC,CNH,CNMD,CNO,"
-    "CNP,CNX,CNXN,CO,COF,COHU,COL,COLB,COLM,COMM,COO,COOP,COP,CORT,COST,"
-    "COTY,CP,CPB,CPE,CPK,CPNG,CPRT,CRC,CRI,CRIS,CRL,CRM,CROX,CRWD,CRS,"
-    "CRUS,CSL,CSCO,CSGP,CSX,CTAS,CTLT,CTRA,CTSH,CTVA,CUBE,CVBF,CVE,CVLT,"
-    "CVS,CVX,CWST,CXT,CZR,D,DAN,DAL,DCI,DCOM,DD,DDS,DE,DECK,DFS,DG,DGX,"
-    "DHI,DHR,DINO,DIS,DISH,DKS,DLR,DLTR,DOC,DORM,DOV,DOW,DPZ,DQ,DRH,DRI,"
-    "DRQ,DT,DTE,DUAL,DUK,DVA,DVN,DX,DXCM,DXC,EA,EBC,EBAY,EBMT,EBC,ECL,"
-    "ED,EFX,EIG,EIX,EL,ELAN,EME,EMN,EMR,ENPH,ENS,ENSG,ENB,ENTG,EOG,EPAM,"
-    "EPD,EPR,EPRT,EQH,EQIX,EQNR,EQR,EQT,ERIE,ES,ESAB,ESNT,ESRT,ESS,ESTC,"
-    "ETN,ETR,ETSY,EVRG,EW,EXC,EXPD,EXPE,EXR,EXP,EXPI,EXTR,FAF,FARO,FAST,"
-    "FBHS,FBMS,FBNC,FBRT,FBP,FCFS,FCNCA,FCPT,FCX,FDS,FDUS,FE,FHB,FHN,"
-    "FICO,FITB,FIVN,FLNG,FLT,FMC,FN,FND,FNF,FORM,FOX,FOXA,FR,FRC,FRT,"
-    "FRST,FTNT,FTV,FUL,FULT,G,GATO,GBT,GCI,GD,GE,GEF,GEHC,GEN,GFF,GILD,"
-    "GIS,GKOS,GL,GLW,GM,GNRC,GO,GOOD,GPC,GPN,GPRO,GRC,GRDN,GS,GSBD,GT,"
-    "GTLB,GVA,GWW,GXO,H,HAE,HAFC,HAL,HALO,HAS,HAYN,HBB,HBI,HBT,HCA,"
-    "HCC,HCI,HCKT,HCSG,HD,HE,HEI,HES,HIBB,HIG,HII,HIHO,HLI,HLT,HLNE,"
-    "HMN,HNI,HOG,HOLX,HOMB,HON,HOPE,HOV,HRL,HRMY,HROW,HRZN,HST,HSY,"
-    "HTH,HUM,HWC,HWM,HXL,HZO,IAA,IAC,IART,IBP,ICE,ICFI,ICUI,IDA,"
-    "IDCC,IDEX,IDXX,IEX,IFF,ILMN,INCY,INDB,IRDM,INSP,INTC,INTU,INVH,"
-    "IP,IPG,IQV,IR,IRM,ISRG,IT,ITT,ITW,IVZ,J,JBHT,JBLU,JBSS,JCI,"
-    "JELD,JEF,JHG,JKHY,JNJ,JNPR,JOBY,JOUT,JPM,JWN,K,KAI,KBH,KBR,"
-    "KD,KFRC,KEYS,KHC,KIM,KLAC,KLIC,KMB,KMI,KMPR,KMX,KNF,KNSL,"
-    "KNTK,KO,KR,KRC,KRG,KTOS,KTB,KW,KWR,L,LAD,LBRT,LCII,LDOS,"
-    "LEN,LH,LHX,LII,LIN,LITE,LKQ,LLY,LMT,LNC,LNT,LOOP,LOW,LRCX,"
-    "LSTR,LUMN,LUV,LVS,LW,LXP,LYB,LYV,MA,MAA,MANH,MAR,MAS,MATX,"
-    "MCD,MCHP,MCK,MCO,MDLZ,MDT,MET,META,MGM,MHK,MIDD,MLCO,MLM,"
-    "MMC,MMM,MMS,MNRO,MNST,MO,MOH,MOS,MOG,MPW,MPC,MPWR,MRK,MRNA,"
-    "MRO,MS,MSCI,MSFT,MSI,MTB,MTD,MTDR,MU,MWA,NBTB,NDAQ,NEO,NEE,"
-    "NEM,NEOG,NET,NFLX,NI,NKE,NNN,NOC,NCLH,NRG,NSA,NSP,NSC,NTAP,"
-    "NTRS,NUE,NVDA,NVR,NVT,NXPI,NYCB,NYT,O,ODFL,OGE,OGN,OHI,OI,"
-    "OIS,OKE,OLN,OMC,ON,ONB,OPCH,ORI,ORCL,ORLY,OTIS,OXY,OZK,PAA,"
-    "PAHC,PAR,PATK,PAYC,PCAR,PCG,PEB,PENN,PEN,PFE,PFG,PG,PGR,"
-    "PH,PHM,PII,PINC,PKG,PLD,PM,PNC,PNM,PNR,PNW,POOL,PPG,PPL,"
-    "POST,PRG,PRK,PRU,PSA,PSX,PTEN,PTC,PVH,PWR,PYPL,QCOM,QRVO,"
-    "R,RBC,RCL,RDN,RDNT,RE,REG,REGN,RF,RHI,RJF,RL,RLJ,RMD,"
-    "ROCK,ROK,ROL,ROP,ROST,RPM,RPRX,RRC,RSG,RTX,RWAY,SAFE,SAIA,"
-    "SBH,SCI,SCHW,SEIC,SF,SFM,SGH,SHAK,SITE,SIX,SKX,SKY,SLB,"
-    "SLG,SLM,SM,SMPL,SNX,SPSC,SPXC,STC,STLD,SUM,SXT,SYM,T,"
-    "TAP,TBK,TCBI,TDG,TDY,TECH,TEL,TEN,TGNA,TGT,THG,THS,TJX,"
-    "TKR,TNC,TNET,TOL,TPH,TREX,TRIP,TRMK,TROW,TRN,TRUP,TSCO,"
-    "TSN,TT,TTWO,TUP,TWLO,TXN,TXR,TYL,UAL,UDR,UHS,ULTA,"
-    "UMBF,UMPQ,UNFI,UNH,UNP,UNIT,UNTY,UPS,URI,USB,V,VFC,"
-    "VICI,VIRT,VLO,VMC,VMI,VNO,VRSK,VRSN,VRTX,VTR,VTRS,VVV,"
-    "VZ,WAB,WAL,WAT,WBA,WBD,WDC,WDFC,WELL,WEN,WES,WEX,WFC,"
-    "WHR,WM,WMB,WMT,WNS,WRB,WRK,WSO,WST,WTW,WY,WYNN,XEL,"
-    "XOM,XPO,XYL,YETI,YUM,ZBH,ZBRA,ZION,ZTS,ZURN,"
-    # Extended Russell 2000 small caps
-    "AAON,ABCB,ABG,ACEL,ACLS,ACNB,AEIS,AFMD,AGCO,AGIO,AGMH,"
-    "AGYS,AIRC,AIT,AKAM,AKR,ALKS,ALTR,AMKR,AMRK,AN,ANF,ANDE,"
-    "ANIK,ANIP,APLE,APOG,APPF,ARCO,ARE,ARKO,ARL,ARNC,AROC,AROW,"
-    "ASB,ASGN,ASH,ASO,ASRT,ASTE,ATLC,ATUS,AX,AYI,AZZ,BANC,BANF,"
-    "BANR,BC,BCC,BCPC,BDC,BDGE,BECN,BMI,BMS,BPMC,BRP,BVS,BXMT,"
-    "CABO,CACI,CALM,CARS,CASY,CBT,CDAY,CDE,CENA,CENX,CFR,CHE,"
-    "CHRD,CIEN,CIR,CIVI,CLF,CLH,CMC,CNH,CNMD,CNO,CNX,COHU,COLB,"
-    "COLL,COLM,COMM,COOP,CORO,CORT,COTY,CPRT,CRC,CRI,CROX,CRS,"
-    "CRUS,CSL,CUBE,CVLT,CWST,CXT,DAN,DCI,DDS,DINO,DKS,DRH,DRQ,"
-    "DUAL,EBC,EBMT,ENSG,ENS,EPRT,EQH,ERIE,ESAB,ESNT,ESRT,EXPI,"
-    "EXTR,FAF,FARO,FBMS,FBNC,FBP,FCFS,FDUS,FHB,FHN,FN,FND,FORM,"
-    "FR,FUL,FULT,GBT,GCI,GFF,GME,GO,GPC,GPRO,GRC,GRDN,GSBD,GVA,"
-    "HAE,HAFC,HAYN,HBB,HBI,HBT,HCC,HCI,HCKT,HCSG,HE,HIBB,HIHO,"
-    "HLI,HLNE,HMN,HNI,HOG,HOMB,HOPE,HOV,HRMY,HROW,HRZN,HTH,HXL,"
-    "HZO,IAA,IBP,ICFI,ICUI,IDA,IDCC,IRDM,INDB,INSP,ITT,J,JBSS,"
-    "JELD,JEF,JOUT,JWN,KAI,KBH,KBR,KFRC,KLIC,KMPR,KNSL,KNTK,"
-    "KRC,KRG,KTOS,KW,KWR,LAD,LBRT,LCII,LII,LITE,LNC,LOOP,LSTR,"
-    "MAA,MANH,MATX,MIDD,MLCO,MMS,MNRO,MOG,MPW,MTDR,MWA,NBTB,NEO,"
-    "NEOG,NNN,NSA,NSP,NVT,NYCB,NYT,OGE,OHI,OI,OIS,OLN,ONB,"
-    "OPCH,ORI,OZK,PAHC,PAR,PATK,PEB,PENN,PEN,PII,PINC,PNM,PNR,"
-    "POST,PRG,PRK,PTEN,PVH,RBC,RDN,RDNT,RHI,RLJ,ROCK,RPM,RPRX,"
-    "RRC,RWAY,SAFE,SAIA,SBH,SCI,SEIC,SF,SFM,SGH,SHAK,SITE,SIX,"
-    "SKX,SKY,SLG,SLM,SM,SMPL,SNX,SPSC,SPXC,STC,STLD,SUM,SXT,SYM,"
-    "TBK,TCBI,TEN,TGNA,THG,THS,TKR,TNC,TNET,TOL,TPH,TREX,TRIP,"
-    "TRMK,TRN,TRUP,TUP,TWLO,TXR,UAL,UMBF,UMPQ,UNFI,UNIT,UNTY,"
-    "VFC,VIRT,VMI,VVV,WAL,WEN,WES,WEX,WNS,WSO,WYNN,XPO,YETI,ZURN,"
-    # Nasdaq growth / tech
-    "AACG,AADI,AAIC,AAME,AAOI,AAON,AAPB,AAPD,AAPS,AAPU,AATC,ABAX,"
-    "ABCL,ABEO,ABIO,ABLX,ABMD,ABMT,ABNB,ABOS,ABST,ABTS,ABVC,ABVT,"
-    "ACAD,ACAH,ACAM,ACAN,ACAQ,ACAS,ACAT,ACAX,ACBI,ACCD,ACCL,ACEL,"
-    "ACET,ACGN,ACHL,ACHV,ACIA,ACIW,ACIX,ACLA,ACLX,ACMR,ACNB,ACOR,"
-    "ACQR,ACRV,ACRX,ACST,ACTG,ACTU,ACVA,ACVF,ACWF,ACWI,ACWV,ACWX,"
-    "ADAP,ADBE,ADCT,ADES,ADIG,ADIL,ADMA,ADMS,ADNK,ADOC,ADPT,ADRO,"
-    "ADSK,ADTN,ADTRAN,ADTX,ADUS,ADVM,ADXN,ADXS,AEAC,AEHL,AEHR,"
-    "AEMD,AENZ,AERI,AEVA,AFIB,AFMD,AFYA,AGBA,AGBT,AGCO,AGEN,AGIO,"
-    "AGLE,AGMH,AGOA,AGRI,AGSS,AGTC,AGTI,AGTX,AHCO,AHII,AIMD,AIMX,"
-    "AKBA,AKBO,AKLI,AKRO,AKSO,AKTS,AKTX,AKUS,ALBO,ALCO,ALEC,ALEX,"
-    "ALGT,ALIM,ALKS,ALLK,ALLR,ALLO,ALLT,ALMA,ALNY,ALOT,ALPC,ALRM,"
-    "ALRS,ALGO,ALTO,ALUR,AMAG,AMBO,AMCX,AMEH,AMED,AMMO,AMOT,AMPH,"
-    "AMPL,AMRN,AMRS,AMSC,AMSF,AMTB,AMTX,AMWD,AMWL,ANAB,ANAC,ANDE,"
-    "ANIC,ANIP,ANNX,ANTE,AOSL,APAM,APEI,APLS,APLT,APOG,APPF,APPN,"
-    "APRE,APTX,APVO,APYX,AQUA,ARC,ARCB,ARCE,ARCH,ARCT,ARDX,AREC,"
-    "ARGX,ARHS,ARID,ARIS,ARKO,ARL,ARLO,ARMP,ARNC,AROC,ARQQ,ARQT,"
-    "ARRY,ARTL,ARTW,ARWR,ARYA,ASAI,ASCA,ASDN,ASLE,ASO,ASRT,ASRV,"
-    "ASST,ASTC,ASTE,ASTS,ASUR,ASYS,ATAI,ATEC,ATER,ATEX,ATHI,ATLC,"
-    "ATNI,ATOM,ATRI,ATSG,ATXI,ATXS,AUDA,AUTO,AUVI,AVAH,AVDL,AVEO,"
-    "AVGO,AVGR,AVID,AVIR,AVNW,AVNS,AVPT,AVRO,AVTA,AVTE,AVTR,AVXL,"
-    "AVYA,AWRE,AXDX,AXGN,AXNX,AXSM,AXTA,AXTI,AZEK,AZPN,AZRE,AZTA,"
-    "BAND,BARK,BATRA,BATRK,BBIO,BBLG,BBSI,BCEL,BCEI,BCOV,BCPC,BCSA,"
-    "BEEM,BELFA,BELFB,BENF,BGCP,BGFV,BGNE,BIDU,BILL,BIMI,BIOL,BIRD,"
-    "BJRI,BKD,BKFS,BKKT,BKSC,BKTI,BLBD,BLCO,BLDP,BLFS,BLIN,BLKB,"
-    "BLMN,BLND,BLNK,BLPH,BLRX,BLTE,BLUE,BMBL,BMRN,BMTC,BNAI,BNOX,"
-    "BNTC,BNTX,BODY,BOKF,BOLT,BORR,BOSC,BOOT,BRBR,BREW,BRKL,BRKR,"
-    "BRLT,BRPH,BRRR,BSIG,BSQR,BSRR,BSVN,BTBT,BTMD,BUSE,BYFC,BYND,"
-    "BYRN,BYSI,BZFD,CAAC,CALM,CALX,CAMT,CARA,CARE,CARG,CARO,CASK,"
-    "CATS,CAVE,CBIO,CBMG,CBTX,CCEP,CCNE,CCOI,CCSI,CDLX,CDMO,CDNA,"
-    "CDRE,CDTX,CDXC,CDXS,CEAD,CECO,CELC,CELH,CELL,CELU,CENN,CENT,"
-    "CEQP,CERE,CERS,CERT,CEVA,CFFI,CFLT,CGBD,CGEM,CGEN,CHCO,CHCT,"
-    "CHDN,CHEF,CHGG,CHKP,CHMI,CHNG,CHPT,CHRD,CHRS,CHUY,CIFR,CIGI,"
-    "CIM,CIOX,CIRC,CIVB,CLBK,CLBT,CLCO,CLDT,CLFD,CLGN,CLIR,CLLS,"
-    "CLMT,CLNC,CLNE,CLPS,CLPT,CLRB,CLS,CLSK,CLST,CLTL,CLVT,CLXT,"
-    "CMBT,CMCO,CMD,CMGE,CMLS,CMO,CMPO,CMPR,CMPS,CMRE,CMRX,CMTG,"
-    "CNCE,CNCR,CNDT,CNHI,CNMD,CNOB,CNSL,CNSP,CNST,CNTB,CNTG,CODA,"
-    "CODE,CODI,CODX,COHU,COIN,COKE,COLB,COLL,COMM,COMP,COND,CONN,"
-    "COOP,CORR,CORS,CORT,COSM,CPAH,CPIX,CPNG,CPOP,CPRI,CPSI,CPTA,"
-    "CRAI,CRBU,CRCT,CRDF,CRDO,CREG,CRMT,CRNT,CRNX,CRPT,CRSA,CRSP,"
-    "CRSR,CRTD,CRTX,CRWD,CSBR,CSGS,CSIQ,CSMB,CSOD,CSPI,CSSE,CSTE,"
-    "CSTL,CTBI,CTGO,CTOS,CTRI,CTSO,CTXR,CUDA,CUEN,CURI,CURO,CURV,"
-    "CUTR,CVAC,CVBF,CVCO,CVET,CVGW,CVLG,CVLY,CVNA,CVSI,CVTI,CWCO,"
-    "CWGL,CXAI,CXDO,CXT,CYCN,CZFS,DCOM,DDOG,DFIN,DGII,DIOD,DMRC,"
-    "DNOW,DORM,DXPE,EVER,EVGO,EVLO,EVLV,EVOP,EVRI,EZPW,FARO,FBIO,"
-    "FBIZ,FCEL,FCFS,FCRX,FEIM,FELE,FFBC,FFBH,FFBW,FFIN,FFNW,FFWM,"
-    "FGEN,FGL,FHCO,FHI,FIBK,FISI,FIVN,FMNB,FNBO,FNCB,FNKO,FNLC,"
-    "FNRN,FNWB,FOA,FOLD,FONR,FORG,FORR,FROG,FRGE,FRGI,FRME,FROG,"
-    "FRPT,FRSH,FRST,FRTX,FSBW,FSCO,FSFG,FSLY,FSTR,FTDR,FTFT,FTHM,"
-    "FTNT,FTRP,FUL,GABC,GCSI,GDOT,GFLI,GHL,GHSI,GIFI,GILT,GINN,"
-    "GKOS,GLDD,GLMD,GLNG,GLOG,GLOP,GLPI,GLRE,GMS,GNLN,GNW,GOEV,"
-    "GOGL,GOOD,GOSS,GPMT,GPRE,GRBK,GREE,GRFS,GRIN,GRND,GRNV,GROM,"
-    "GRPH,GRPN,GRRR,GRTX,GRVY,GRWG,GSBC,GSIT,GSKY,GTAC,GTBI,GTBP,"
-    "GTHX,GTIM,GTLB,GTNX,GURE,GURV,GWRE,HALO,HARP,HCNB,HDSN,HEAR,"
-    "HEP,HGBL,HGV,HIFS,HIHO,HIPO,HIRC,HITI,HIVE,HLLY,HLP,HLX,"
-    "HNNA,HOFT,HOLI,HOLX,HONE,HOOD,HOOK,HOPB,HPK,HQCL,HRPK,"
-    "HSBC,HSCS,HSKA,HTBI,HTBK,HTHT,HUGE,HVBC,HVT,HWBK,HWKN,"
-    "HYAC,HYLN,HYMC,HYPR,HYRE,IAA,IART,IBCP,IBEX,IBIO,IBKR,"
-    "IBUY,ICAD,ICCM,ICFI,ICON,ICPT,ICUI,IDAI,IDCC,IDGT,IDIG,"
-    "IDMO,IDNA,IDNB,IDRA,IDSA,IDXX,IDYA,IEC,IEP,IESC,IFN,"
-    "IFRS,IGMS,IGNI,IGT,IIIV,IINO,IIS,IIVI,IKT,ILCG,ILPT,"
-    "IMAB,IMAC,IMAX,IMBI,IMCC,IMCR,IMGN,IMNM,IMNN,IMRX,IMTX,"
-    "IMUX,IMVT,IMXI,INAB,INBS,INBX,INCY,INDB,INDI,INDT,INFI,"
-    "INFU,INGN,INHD,INKT,INLX,INMB,INO,INPX,INSE,INSG,INSM,"
-    "INSP,INTC,INTZ,INVA,INVE,INVO,INVX,IOSP,IPDN,IPIX,IPMD,"
-    "IRBT,IRCP,IRDM,IRMD,ISBA,ISCO,ISDR,ISEE,ISIG,ISNS,ISPC,"
-    "ISRG,ISSC,ISTR,ITCI,ITGR,ITIC,ITKP,ITMD,ITOS,ITRI,ITRM,"
-    "ITRN,ITT,ITUS,ITVN,IVAC,IVAN,IVT,IZEA,JAMF,JANX,JBLU,"
-    "JBSS,JFIN,JHG,JILL,JJSF,JKS,JMIA,JOBY,JRSH,JUPW,KALA,"
-    "KALV,KALU,KALY,KDNY,KFRC,KIDS,KIN,KINS,KIRK,KLXE,KMDA,"
-    "KNDI,KNOP,KNSA,KORE,KREF,KRMD,KRTX,KRYS,KSCP,LAIX,LAKE,"
-    "LARK,LASE,LAUR,LAW,LAZ,LBAI,LBPH,LBRT,LBUY,LCFY,LCID,"
-    "LCII,LCNB,LCUT,LDI,LEGN,LESL,LGND,LGVN,LI,LILA,LILAK,"
-    "LIQT,LKFN,LMAT,LMND,LMNL,LNSR,LNTH,LOCO,LODE,LOGI,"
-    "LOPE,LORR,LOVE,LPCN,LPLA,LPRO,LPSN,LPTX,LQDA,LRFC,"
-    "LSBK,LSCC,LSCR,LSTR,LTBR,LTCH,LTRY,LUCD,LUCK,LULU,"
-    "LUNA,LUNG,LYEL,LYRA,LYTS,LYTX,MAIA,MAMO,MARA,MARK,"
-    "MASA,MATH,MATW,MBOT,MBUU,MBWM,MCBS,MCFT,MCNB,MCRB,"
-    "MCRI,MDGL,MDIA,MDLZ,MDNA,MDRR,MDSP,MDVX,MDXG,MEDS,"
-    "MEIP,MELI,MEOH,MERC,MESA,MFIN,MFON,MGEE,MGNX,MGPI,"
-    "MGY,MICT,MIGI,MIMO,MIND,MINM,MIRM,MIST,MITK,MKDL,"
-    "MKFG,MKSI,MKTX,MLNK,MLSS,MMAT,MMED,MMLP,MMSI,MNDO,"
-    "MNKD,MNMD,MNOV,MNRO,MOBI,MOFG,MOGO,MOMO,MOOR,MORF,"
-    "MORN,MPLN,MPVD,MPWR,MRCC,MRMD,MRSN,MRTN,MRUS,MRVI,"
-    "MSBF,MSBI,MSEX,MSGE,MSGN,MSTR,MTAC,MTBC,MTCN,MTEM,"
-    "MTEX,MTLS,MTOR,MTRN,MTRX,MTSI,MTSM,MVBF,MVST,MYMD,"
-    "MYND,MYPS,MYRG,NABL,NATH,NATI,NAVI,NBHC,NBTB,NCBS,"
-    "NCMI,NCNO,NDLS,NDRA,NEO,NEOG,NEON,NEPH,NETE,NEVI,"
-    "NEWR,NEXT,NFBK,NFLX,NFNT,NGEN,NGMS,NHWK,NICE,NIHD,"
-    "NKLA,NKTR,NLSN,NLY,NMFC,NMIH,NMRK,NNBR,NNDM,NOVN,"
-    "NOVT,NPCE,NRDS,NREF,NRIX,NRXP,NSA,NSTG,NTCT,NTGR,"
-    "NTIC,NTST,NUAN,NUVA,NUVL,NVAX,NVEI,NVFY,NVGS,NVIV,"
-    "NVNI,NVNO,NVOS,NVRI,NVRO,NWBI,NWFL,NXGN,NXRT,NXST,"
-    "NYMT,NYMX,OABI,OBLG,OBSV,OCFC,OCGN,OCSL,OCUP,OCX,"
-    "OFG,OIIM,OKTA,OLMA,OLPX,OMAB,OMCL,OMFL,OMGA,ONCT,"
-    "ONDAS,ONEW,ONIC,ONLN,ONMD,ONON,ONPH,ONTF,OPBK,OPEN,"
-    "OPGN,OPHC,OPNT,OPOF,OPRA,OPRT,OPSN,OPTX,ORAN,ORGO,"
-    "ORPH,ORTX,OSBC,OSCR,OSIS,OSPN,OSTK,OSUR,OTEX,OTMO,"
-    "OVBC,OVID,OVLY,OXSQ,OYST,PAAS,PACB,PACK,PACW,PALI,"
-    "PALT,PANL,PARD,PATI,PAX,PAYS,PBFS,PBH,PBPB,PBYI,"
-    "PCCA,PCCO,PCEF,PCOR,PCSB,PCTI,PCYG,PDCO,PDEX,PDFS,"
-    "PDLB,PEGY,PERI,PFBC,PFBI,PFIS,PGNY,PHIC,PHIO,PHMD,"
-    "PHUN,PICC,PINE,PINC,PINS,PIRS,PKBK,PKOH,PLAB,PLAN,"
-    "PLBC,PLBY,PLCE,PLUG,PLUS,PLXP,POET,POLA,PODD,POWL,"
-    "PPBT,PPIH,PRAA,PRCT,PRDO,PRET,PREX,PRTK,PRTY,PRUA,"
-    "PRVB,PRVC,PSEC,PSHG,PSNL,PSTL,PTCT,PTIX,PTLO,PTMN,"
-    "PTSI,PULM,PVBC,PWOD,PXLW,PXMD,PYXS,PZZA,QFIN,QMCO,"
-    "QNST,QUBT,QUIK,QURE,RADI,RADN,RAIN,RAPN,RARE,RAVE,"
-    "RAYA,RBBN,RBCAA,RBLX,RCKT,RCKY,RCML,RCMT,RCRT,RDHL,"
-    "RDIB,RDNT,RDVT,RDWR,REAX,RECT,RELI,RENN,REPX,RETO,"
-    "RFIL,RFND,RGCO,RGEN,RGLD,RGLS,RGNX,RIBT,RICK,RICO,"
-    "RIGL,RILY,RIOT,RLGT,RLJE,RLMD,RMCF,RMNI,RNET,RNLX,"
-    "RNST,RNWK,ROAD,ROCC,ROCK,ROIV,ROVR,RPAY,RPID,RPTX,"
-    "RRBI,RRGB,RRTS,RSEM,RSVR,RTLX,RTRX,RUBY,RUMB,RVNC,"
-    "RVPH,RVSB,RWLK,RXMD,RXRX,RYAM,SAFE,SAFM,SAGE,SAIL,"
-    "SAMG,SANG,SANM,SASR,SAST,SBCF,SBFG,SBGL,SBNY,SBOW,"
-    "SBRE,SBSI,SBSW,SCHL,SCHN,SCOR,SCPH,SCPS,SCRM,SCSC,"
-    "SCVL,SEAL,SEER,SEMA,SENS,SERV,SFBS,SFNC,SGBX,SGEN,"
-    "SGHC,SGLY,SGMO,SGMT,SGRP,SGRY,SGTX,SHBI,SHCA,SHCR,"
-    "SHFS,SHLX,SHMD,SHOO,SHPW,SIDU,SIEB,SILK,SILV,SILO,"
-    "SIOX,SIRV,SITM,SJW,SKIL,SKLZ,SLCA,SLDB,SLGL,SLNA,"
-    "SLNO,SLRC,SLRN,SLRX,SLVM,SMBC,SMFL,SMMT,SMMF,SMPL,"
-    "SMSI,SMTC,SMTI,SNBR,SNCE,SNDA,SNEX,SNGX,SNPO,SNPX,"
-    "SNSE,SNSR,SNST,SNTG,SNUG,SNVS,SOCL,SODI,SOGP,SOLO,"
-    "SONM,SONN,SOPA,SOUN,SPFI,SPNE,SPNS,SPOK,SPPL,SPRB,"
-    "SPRC,SPRO,SPRT,SPSC,SPTN,SPWH,SPXC,SQNS,SQSP,SREV,"
-    "SRMX,SRNE,SRPT,SRRK,SRTS,SSBI,SSBT,SSBK,SSFN,SSNT,"
-    "SSRM,SSSS,SSTI,SSYS,STAA,STAF,STBA,STCN,STGW,STIM,"
-    "STKL,STLA,STLC,STNE,STNG,STOK,STPC,STRL,STRN,STRO,"
-    "STRR,STRS,STRT,STSA,STXS,SUMO,SUNN,SUPV,SURG,SWAG,"
-    "SWAV,SWBI,SWIR,SWKH,SYBT,SYBX,SYNH,SYRA,SYTA,TACT,"
-    "TAIT,TALO,TANH,TAOP,TARA,TBBB,TBBS,TBIO,TBLM,TBLT,"
-    "TBNK,TBPH,TCBC,TCBK,TCBS,TCDA,TCFC,TCMD,TCRR,TCRX,"
-    "TDAC,TDIV,TDOC,TDUP,TELA,TELL,TENK,TENX,TERN,TESS,"
-    "TGLS,TGNA,TGTX,THFF,THGS,THMO,THRY,TIAX,TILS,TIRX,"
-    "TITN,TLIS,TLGA,TLND,TLPH,TLRY,TMDI,TMDX,TMVW,TNYA,"
-    "TOEM,TOGI,TOKN,TOLS,TOMZ,TOPS,TOST,TOWR,TPBK,TPCO,"
-    "TPIC,TPST,TRAK,TRCA,TRCN,TREE,TRES,TRHC,TRIN,TRIP,"
-    "TRIV,TRMK,TRNS,TRPH,TRPL,TRPX,TRST,TRTX,TRVG,TRVN,"
-    "TSBK,TSEM,TSHA,TSOI,TSRI,TTCF,TTGT,TTOO,TTSH,TUSK,"
-    "TUYA,TWST,TXMD,TXNM,TXPH,TXRH,TYME,UBCP,UBFO,UBOH,"
-    "UBSI,UCBI,UCTT,UDMY,UEIC,ULBI,ULCC,UMBF,UMPQ,UNFI,"
-    "UNIT,UNTY,UONE,UONEK,UPBD,UPHL,UPST,URBN,URGN,USAP,"
-    "USAT,USBI,USEG,USFD,USIO,USLM,USPH,UUUU,UVSP,VABK,"
-    "VALU,VAXX,VCNX,VCSA,VCTR,VCYT,VECO,VEEV,VERI,VERO,"
-    "VGIT,VGLT,VGSH,VIAV,VICR,VIOT,VIPS,VIRC,VIRI,VISL,"
-    "VISM,VIST,VITL,VITX,VIVK,VIVO,VLRS,VNET,VNRX,VOXX,"
-    "VRAY,VRCA,VRDN,VREX,VRGX,VRNA,VRNAF,VRPX,VSAC,VSCO,"
-    "VSEC,VSTE,VTGN,VTOL,VTRS,VTSI,VTYX,VUZI,VVOS,VXRT,"
-    "VYGR,VYNT,WABC,WAFD,WAIT,WATT,WCLD,WDAY,WDFC,WEBR,"
-    "WEGE,WELL,WERN,WEYS,WFCF,WFRD,WGBS,WINT,WIRE,WISA,"
-    "WISH,WISP,WKHS,WKME,WLFC,WLTW,WMGI,WMRD,WMPN,WNEB,"
-    "WNNR,WOLF,WOOF,WORX,WRBY,WSBC,WSFS,WSTG,WSTL,WTBA,"
-    "WTFC,WTRG,WULF,WWAC,XBIT,XCUR,XELA,XELB,XENE,XENT,"
-    "XERS,XFOR,XINO,XNCR,XNET,XOMA,XONE,XPEV,XPLR,XPOA,"
-    "XPOF,XPRO,XRTX,XSPA,XTLB,XWEL,XXII,XYLD,YETI,YGMZ,"
-    "YMAB,YNDX,YOTA,YRCW,YTEN,YY,ZEAL,ZEUS,ZFOX,ZGNX,"
-    "ZIMV,ZLAB,ZNTH,ZNTL,ZSAN,ZUUS,ZVIA,ZVRA,ZYME,ZYXI"
-)
-
 
 @st.cache_data(ttl=86400, show_spinner=False)
-@st.cache_data(ttl=86400, show_spinner=False)
-def get_stooq_ticker_list() -> list[str]:
+def get_ticker_list() -> list:
     """
-    Fetches the complete NYSE + Nasdaq common stock universe from NASDAQ's
-    official symbol directory files — two tiny public pipe-delimited text
-    files that require no authentication:
-
-      nasdaqlisted.txt  ~4,000 Nasdaq-listed securities
-      otherlisted.txt   ~4,500 NYSE/AMEX-listed securities
-
-    We filter to common shares only:
-      - Test Issue = N  (excludes test/placeholder symbols)
-      - ETF = N         (excludes ETFs)
-      - Symbol is 1-5 pure alpha chars (excludes warrants, rights, units)
-
-    This reliably yields ~6,000-8,000 common stock tickers.
-    Falls back to the embedded ~2,500-ticker list if NASDAQ is unreachable.
+    Fetch full NYSE + Nasdaq common stock universe from NASDAQ's
+    official symbol directory. Falls back to embedded list if unreachable.
     """
     NASDAQ_URLS = {
         "nasdaq": "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt",
         "other":  "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt",
     }
-
     tickers = set()
-
     try:
         for market, url in NASDAQ_URLS.items():
             r = requests.get(url, headers=HEADERS, timeout=20)
             if r.status_code != 200 or len(r.text) < 500:
                 continue
-
-            lines = r.text.strip().splitlines()
-            if not lines:
-                continue
-
-            # Parse pipe-delimited header to find column indices
+            lines  = r.text.strip().splitlines()
             header = [h.strip().lower() for h in lines[0].split("|")]
-
             if market == "nasdaq":
-                # Columns: Symbol | Security Name | Market Category | Test Issue | Financial Status | Round Lot Size | ETF | NextShares
                 try:
-                    sym_col      = header.index("symbol")
-                    test_col     = header.index("test issue")
-                    etf_col      = header.index("etf")
+                    sym_col  = header.index("symbol")
+                    test_col = header.index("test issue")
+                    etf_col  = header.index("etf")
                 except ValueError:
                     sym_col, test_col, etf_col = 0, 3, 6
-
-                for line in lines[1:]:
-                    if line.startswith("File Creation Time"):
-                        continue
-                    parts = line.split("|")
-                    if len(parts) <= max(sym_col, test_col, etf_col):
-                        continue
-                    sym  = parts[sym_col].strip().upper()
-                    test = parts[test_col].strip().upper()
-                    etf  = parts[etf_col].strip().upper()
-                    if test == "N" and etf == "N" and 1 <= len(sym) <= 5 and sym.isalpha():
-                        tickers.add(sym)
-
-            else:  # other (NYSE/AMEX)
-                # Columns: ACT Symbol | Security Name | Exchange | CQS Symbol | ETF | Round Lot Size | Test Issue | NASDAQ Symbol
+            else:
                 try:
-                    sym_col      = header.index("act symbol")
-                    test_col     = header.index("test issue")
-                    etf_col      = header.index("etf")
+                    sym_col  = header.index("act symbol")
+                    test_col = header.index("test issue")
+                    etf_col  = header.index("etf")
                 except ValueError:
                     sym_col, test_col, etf_col = 0, 6, 4
-
-                for line in lines[1:]:
-                    if line.startswith("File Creation Time"):
-                        continue
-                    parts = line.split("|")
-                    if len(parts) <= max(sym_col, test_col, etf_col):
-                        continue
-                    sym  = parts[sym_col].strip().upper()
-                    test = parts[test_col].strip().upper()
-                    etf  = parts[etf_col].strip().upper()
-                    if test == "N" and etf == "N" and 1 <= len(sym) <= 5 and sym.isalpha():
-                        tickers.add(sym)
-
+            for line in lines[1:]:
+                if line.startswith("File Creation Time"):
+                    continue
+                parts = line.split("|")
+                if len(parts) <= max(sym_col, test_col, etf_col):
+                    continue
+                sym  = parts[sym_col].strip().upper()
+                test = parts[test_col].strip().upper()
+                etf  = parts[etf_col].strip().upper()
+                if test == "N" and etf == "N" and 1 <= len(sym) <= 5 and sym.isalpha():
+                    tickers.add(sym)
     except Exception:
         pass
 
-    # Fall back to embedded list if fetch yielded too few results
+    # Embedded fallback
     if len(tickers) < 1000:
-        embedded = set(
-            t.strip() for t in _UNIVERSE.replace("\n", "").split(",") if t.strip()
+        fallback = (
+            "A,AA,AAL,AAON,AAP,AAPL,ABBV,ABC,ABMD,ABT,ABUS,ACN,ADBE,ADI,ADM,ADP,ADSK,"
+            "AEE,AEP,AES,AFL,AGIO,AGCO,AIG,AIRC,AIT,AIZ,AJG,AKAM,AKR,AL,ALB,ALGN,"
+            "ALK,ALLE,ALLY,ALNY,AM,AMCR,AME,AMED,AMG,AMGN,AMH,AMP,AMT,AN,ANET,ANF,"
+            "ANSS,AON,AOS,APA,APD,APH,APLE,APTV,AR,ARE,ARKO,ARW,ASB,ASGN,ASH,ASO,"
+            "ASTE,ATI,ATR,ATUS,AVA,AVB,AVGO,AVT,AVY,AWK,AXON,AXP,AYI,AZO,AZZ,"
+            "B,BA,BAC,BAH,BALL,BANF,BANR,BAX,BBWI,BBY,BC,BCC,BDX,BECN,BEN,BIG,"
+            "BIIB,BIO,BJRI,BKD,BKNG,BLDR,BLKB,BLMN,BMI,BMS,BMY,BN,BNL,BOKF,"
+            "BOOT,BR,BSX,BWA,BWXT,BXP,BXMT,C,CABO,CACI,CAKE,CAL,CALM,CALX,CAMT,"
+            "CAR,CARG,CARS,CASY,CAT,CATO,CATY,CBOE,CBRE,CBRL,CC,CCK,CCL,CDK,CDW,"
+            "CE,CEG,CF,CFG,CFR,CHD,CHE,CHDN,CHEF,CHGG,CHKP,CHRD,CHTR,CI,CIEN,"
+            "CINF,CIR,CIVI,CL,CLF,CLH,CLX,CMA,CMCSA,CMC,CME,CMG,CMI,CMS,CNC,"
+            "CNH,CNMD,CNO,CNP,CNX,COF,COLB,COLM,COO,COOP,COP,COST,CP,CPB,CPRT,"
+            "CRC,CRI,CRL,CRM,CROX,CRWD,CRS,CRUS,CSL,CSCO,CSX,CTAS,CTLT,CTRA,"
+            "CTSH,CTVA,CUBE,CVS,CVX,CWST,CZR,D,DAL,DCI,DD,DDS,DE,DECK,DFS,DG,"
+            "DGX,DHI,DHR,DIS,DISH,DKS,DLR,DLTR,DOV,DOW,DPZ,DRI,DTE,DUK,DVA,"
+            "DVN,DXCM,EA,EBAY,ECL,ED,EFX,EIX,EL,EME,EMN,EMR,ENPH,ENS,ENSG,"
+            "EOG,EPAM,EQH,EQIX,EQR,EQT,ERIE,ES,ESNT,ESS,ETN,ETR,ETSY,EVRG,EW,"
+            "EXC,EXPD,EXPE,EXR,FAF,FAST,FBHS,FCX,FDS,FE,FICO,FITB,FIVN,FLT,"
+            "FMC,FN,FND,FNF,FOX,FOXA,FR,FRT,FTNT,FTV,FUL,FULT,G,GD,GE,GFF,"
+            "GEHC,GEN,GILD,GIS,GL,GLW,GM,GNRC,GO,GPC,GPN,GS,GT,GTLB,GWW,GXO,"
+            "HAL,HALO,HAS,HCA,HD,HE,HES,HIG,HII,HLT,HMN,HOG,HOLX,HON,HRL,"
+            "HRMY,HST,HSY,HUM,HWC,HWM,IAA,IBP,ICE,IDXX,IEX,IFF,ILMN,INCY,"
+            "INDB,INTC,INTU,INVH,IP,IPG,IQV,IR,IRM,ISRG,IT,ITT,ITW,IVZ,J,"
+            "JBHT,JBLU,JCI,JEF,JKHY,JNJ,JNPR,JPM,JWN,K,KBH,KBR,KEYS,KHC,KIM,"
+            "KLAC,KMB,KMI,KMX,KO,KR,KRC,KRG,L,LAD,LDOS,LEN,LH,LHX,LII,LIN,"
+            "LKQ,LLY,LMT,LNC,LNT,LOW,LRCX,LSTR,LUMN,LUV,LVS,LW,LYB,LYV,MA,"
+            "MAA,MANH,MAR,MAS,MCD,MCHP,MCK,MCO,MDLZ,MDT,MET,META,MGM,MHK,"
+            "MLM,MMC,MMM,MMS,MNST,MO,MOH,MOS,MPC,MPWR,MRK,MRNA,MRO,MS,MSCI,"
+            "MSFT,MSI,MTB,MTD,MTDR,MU,NEE,NEM,NET,NFLX,NI,NKE,NNN,NOC,NRG,"
+            "NSC,NTAP,NTRS,NUE,NVDA,NVR,NVT,NXPI,NYT,O,ODFL,OGN,OHI,OKE,"
+            "OLN,OMC,ON,ONB,OPCH,ORI,ORCL,ORLY,OTIS,OXY,OZK,PAYC,PCAR,PCG,"
+            "PEP,PFE,PFG,PG,PGR,PH,PHM,PII,PKG,PLD,PM,PNC,PNR,PNW,POOL,PPG,"
+            "PPL,POST,PRG,PRU,PSA,PSX,PTC,PVH,PWR,PYPL,QCOM,R,RCL,RDN,RE,"
+            "REG,REGN,RF,RHI,RJF,RL,RLJ,RMD,ROK,ROL,ROP,ROST,RPM,RPRX,RRC,"
+            "RSG,RTX,SAFE,SAIA,SBH,SCI,SCHW,SEIC,SF,SFM,SITE,SKX,SLB,SLG,"
+            "SLM,SM,SNX,STC,STLD,SUM,SXT,T,TAP,TDG,TDY,TECH,TEL,TGT,THG,"
+            "THS,TJX,TNET,TOL,TREX,TRMK,TROW,TSN,TT,TTWO,TSCO,TXN,TYL,UAL,"
+            "UDR,UHS,ULTA,UNH,UNP,UPS,USB,V,VFC,VICI,VLO,VMC,VNO,VRSK,VRSN,"
+            "VRTX,VTR,VTRS,VZ,WAB,WAL,WAT,WBA,WBD,WDC,WELL,WEN,WES,WFC,WHR,"
+            "WM,WMB,WMT,WNS,WRB,WRK,WST,WTW,WY,WYNN,XEL,XOM,XPO,XYL,YETI,"
+            "YUM,ZBH,ZBRA,ZION,ZTS,"
+            # Nasdaq growth
+            "ABNB,ACAD,ACEL,ACLS,ADBE,ADSK,ADTN,ADVM,AEIS,AFL,AGEN,AGIO,AGYS,"
+            "AKBA,AKRO,AKTS,ALBO,ALEC,ALGT,ALKS,ALLK,ALLO,ALMA,ALNY,ALRM,ALGO,"
+            "AMAG,AMEH,AMED,AMMO,AMOT,AMPH,AMPL,AMRN,AMSC,AMTB,AMWD,AMWL,"
+            "ANAB,ANAC,ANTE,AOSL,APAM,APEI,APLS,APLT,APOG,APPF,APPN,APVO,APYX,"
+            "ARCE,ARCH,ARCT,ARDX,ARGX,ARHS,ARIS,ARLO,ARMP,ARNC,AROC,ARQT,ARRY,"
+            "ARTL,ARTW,ARWR,ASAI,ASLE,ASO,ASRT,ASRV,ASST,ASTC,ASTS,ASUR,ASYS,"
+            "ATAI,ATEC,ATER,ATEX,ATLC,ATNI,ATOM,ATRI,ATSG,ATXI,ATXS,AUTO,AVAH,"
+            "AVDL,AVEO,AVGO,AVGR,AVID,AVIR,AVNW,AVNS,AVPT,AVRO,AVTA,AVTE,AVTR,"
+            "AVXL,AWRE,AXDX,AXGN,AXNX,AXSM,AXTA,AXTI,AZEK,AZPN,BAND,BATRA,"
+            "BATRK,BBIO,BBSI,BCEL,BCEI,BCOV,BCPC,BEEM,BELFA,BELFB,BGNE,BIDU,"
+            "BILL,BIOL,BIRD,BJRI,BKSC,BKTI,BLBD,BLCO,BLDP,BLFS,BLKB,BLMN,"
+            "BLND,BLNK,BLPH,BLRX,BLTE,BLUE,BMBL,BMRN,BMTC,BNTX,BODY,BOKF,"
+            "BOLT,BORR,BOSC,BOOT,BRBR,BREW,BRKL,BRKR,BRPH,BSIG,BSRR,BSVN,"
+            "BTBT,BUSE,BYFC,BYND,BZFD,CALM,CALX,CAMT,CARA,CARE,CARG,CAVE,"
+            "CBIO,CBMG,CBTX,CCEP,CCNE,CCOI,CDLX,CDMO,CDNA,CDRE,CDTX,CDXS,"
+            "CECO,CELH,CELU,CENN,CENT,CEQP,CERE,CERS,CEVA,CFLT,CGEN,CHCO,"
+            "CHDN,CHEF,CHGG,CHKP,CHRD,CHUY,CIGI,CIFR,CLBT,CLCO,CLDT,CLFD,"
+            "CLGN,CLIR,CLLS,CLMT,CLNE,CLPS,CLPT,CLRB,CLS,CLSK,CLVT,CLXT,"
+            "CMCO,CMO,CMPO,CMPR,CMPS,CMRX,CMTG,CNCE,CNDT,CNHI,CNMD,CNOB,"
+            "CNSL,CNSP,CNST,COIN,COKE,COLB,COLL,CONN,COOP,CORR,CORT,COSM,"
+            "CPIX,CPNG,CPRI,CPSI,CRAI,CRBU,CRCT,CRDF,CRDO,CREG,CRMT,CRNT,"
+            "CRNX,CRSP,CRSR,CRTX,CRWD,CSBR,CSGS,CSIQ,CSOD,CSPI,CSSE,CSTL,"
+            "CTBI,CTOS,CTRI,CTSO,CUDA,CURI,CURO,CURV,CUTR,CVAC,CVBF,CVCO,"
+            "CVET,CVGW,CVLG,CVNA,CWCO,CXAI,CXDO,CYCN,CZFS,DCOM,DDOG,DFIN,"
+            "DGII,DIOD,DMRC,DNOW,DORM,DXPE,EVER,EVGO,EVLO,EVLV,EVOP,EVRI,"
+            "EZPW,FARO,FBIZ,FCEL,FCFS,FEIM,FELE,FFBC,FFBH,FFIN,FFNW,FFWM,"
+            "FGEN,FHCO,FIBK,FISI,FIVN,FMNB,FNKO,FNLC,FORG,FORR,FROG,FRGI,"
+            "FRME,FRPT,FRSH,FRST,FRTX,FSBW,FSLY,FSTR,FTDR,FTNT,GABC,GDOT,"
+            "GKOS,GLDD,GLMD,GLPI,GLRE,GMS,GNLN,GNW,GOOD,GOSS,GPMT,GPRE,"
+            "GRBK,GRFS,GRND,GRPH,GRPN,GRTX,GRVY,GRWG,GSBC,GSIT,GTNX,GURE,"
+            "GWRE,HALO,HARP,HEAR,HEP,HIFS,HIHO,HIPO,HIRC,HLLY,HLX,HNNA,"
+            "HOFT,HOLI,HOLX,HOOD,HOOK,HOPB,HPK,HQCL,HRPK,HSKA,HTBK,HTHT,"
+            "HUGE,HVT,HWBK,HWKN,HYLN,IAA,IART,IBCP,IBEX,IBIO,IBKR,ICAD,"
+            "ICON,ICPT,ICUI,IDCC,IDGT,IDXX,IDYA,IEC,IEP,IFRS,IGMS,IGT,IIIV,"
+            "IINO,IIVI,IKT,ILPT,IMAB,IMAC,IMAX,IMBI,IMCC,IMCR,IMGN,IMNM,"
+            "IMNN,IMRX,IMTX,IMUX,IMVT,IMXI,INAB,INBS,INBX,INCY,INDB,INDI,"
+            "INFI,INFU,INGN,INKT,INLX,INMB,INO,INPX,INSE,INSG,INSM,INSP,"
+            "INTZ,INVA,INVE,INVO,INVX,IOSP,IPDN,IPIX,IRBT,IRCP,IRDM,IRMD,"
+            "ISBA,ISSC,ISTR,ITCI,ITGR,ITIC,ITMD,ITOS,ITRI,ITRM,ITRN,ITUS,"
+            "ITVN,IVAC,IVT,IZEA,JAMF,JANX,JBLU,JBSS,JFIN,JHG,JILL,JJSF,"
+            "JKS,JMIA,JOBY,JRSH,KALA,KALV,KALU,KDNY,KFRC,KIDS,KIN,KIRK,"
+            "KLXE,KMDA,KNDI,KNOP,KNSA,KORE,KREF,KRMD,KRTX,KRYS,KSCP,LAKE,"
+            "LARK,LASE,LAUR,LAW,LAZ,LBAI,LBPH,LCID,LCII,LCNB,LCUT,LDI,"
+            "LEGN,LESL,LGND,LGVN,LI,LILA,LILAK,LKFN,LMAT,LMND,LNSR,LNTH,"
+            "LOCO,LOGI,LOPE,LOVE,LPLA,LPRO,LPSN,LPTX,LQDA,LRFC,LSBK,LSCC,"
+            "LSCR,LSTR,LTBR,LTCH,LUCD,LULU,LUNA,LUNG,LYEL,LYTS,LYTX,MAIA,"
+            "MAMO,MARA,MARK,MATW,MBOT,MBUU,MBWM,MCBS,MCFT,MCNB,MCRB,MCRI,"
+            "MDGL,MDNA,MDRR,MDSP,MDVX,MDXG,MEDS,MEIP,MELI,MEOH,MERC,MESA,"
+            "MFIN,MGEE,MGNX,MGPI,MGY,MICT,MIGI,MIMO,MIND,MINM,MIRM,MIST,"
+            "MITK,MKSI,MKTX,MLNK,MLSS,MMAT,MMED,MMSI,MNDO,MNKD,MNMD,MNOV,"
+            "MNRO,MOBI,MOFG,MOGO,MOMO,MORF,MORN,MPLN,MPVD,MPWR,MRCC,MRMD,"
+            "MRSN,MRTN,MRUS,MRVI,MSBI,MSEX,MSGE,MSGN,MSTR,MTBC,MTEM,MTEX,"
+            "MTLS,MTOR,MTRN,MTRX,MTSI,MVBF,MVST,MYMD,MYND,MYPS,MYRG,NABL,"
+            "NATH,NATI,NAVI,NBHC,NBTB,NCBS,NCMI,NCNO,NDLS,NEO,NEOG,NEON,"
+            "NEPH,NETE,NEVI,NEWR,NEXT,NFBK,NFLX,NFNT,NGEN,NGMS,NHWK,NICE,"
+            "NIHD,NKLA,NKTR,NLSN,NLY,NMFC,NMIH,NMRK,NNBR,NNDM,NOVN,NOVT,"
+            "NPCE,NRDS,NREF,NRIX,NRXP,NSA,NSTG,NTCT,NTGR,NTIC,NTST,NUAN,"
+            "NUVA,NUVL,NVAX,NVEI,NVGS,NVIV,NVNI,NVNO,NVOS,NVRI,NVRO,NWBI,"
+            "NWFL,NXGN,NXRT,NXST,NYMT,NYMX,OBDC,OBLG,OBSV,OCFC,OCGN,OCSL,"
+            "OCUP,OFG,OKTA,OLMA,OLPX,OMAB,OMCL,OMGA,ONCT,ONDAS,ONEW,ONLN,"
+            "ONMD,ONON,ONPH,OPBK,OPEN,OPGN,OPHC,OPNT,OPRA,OPRT,OPSN,OPTX,"
+            "ORAN,ORGO,ORPH,OSCR,OSIS,OSPN,OSTK,OSUR,OTEX,OTMO,OVBC,OVID,"
+            "OVLY,OYST,PAAS,PACB,PACK,PACW,PALI,PALT,PANL,PARD,PATI,PAX,"
+            "PAYS,PBFS,PBH,PBPB,PBYI,PCCA,PCCO,PCOR,PCTI,PCYG,PDCO,PDEX,"
+            "PDFS,PDLB,PEGY,PERI,PFBC,PFBI,PFIS,PGNY,PHIC,PHIO,PHMD,PHUN,"
+            "PINE,PINS,PIRS,PKBK,PKOH,PLAB,PLAN,PLBC,PLBY,PLCE,PLUG,PLUS,"
+            "PLXP,POET,POLA,PODD,POWL,PRAA,PRCT,PRDO,PRET,PREX,PRTK,PRTY,"
+            "PRVB,PRVC,PSEC,PSHG,PSNL,PSTL,PTCT,PTIX,PTLO,PTMN,PTSI,PULM,"
+            "PVBC,PWOD,PXLW,PXMD,PYXS,PZZA,QFIN,QMCO,QNST,QUBT,QUIK,QURE,"
+            "RADI,RADN,RAIN,RAPN,RARE,RAVE,RAYA,RBBN,RBLX,RCKT,RCKY,RCML,"
+            "RCMT,RCRT,RDHL,RDIB,RDNT,RDVT,RDWR,REAX,RECT,RELI,RENN,REPX,"
+            "RETO,RFIL,RFND,RGCO,RGEN,RGLD,RGLS,RGNX,RIBT,RICK,RICO,RIGL,"
+            "RILY,RIOT,RLGT,RLJE,RLMD,RMCF,RMNI,RNET,RNLX,RNST,RNWK,ROAD,"
+            "ROCC,ROCK,ROIV,ROVR,RPAY,RPID,RPTX,RRBI,RRGB,RRTS,RSEM,RSVR,"
+            "RTLX,RTRX,RUBY,RUMB,RVNC,RVPH,RVSB,RWLK,RXMD,RXRX,RYAM,SAFE,"
+            "SAFM,SAGE,SAIL,SAMG,SANG,SANM,SASR,SAST,SBCF,SBFG,SBGL,SBNY,"
+            "SBOW,SBRE,SBSI,SBSW,SCHL,SCHN,SCOR,SCPH,SCPS,SCRM,SCSC,SCVL,"
+            "SEAL,SEER,SEMA,SENS,SERV,SFBS,SFNC,SGBX,SGEN,SGHC,SGLY,SGMO,"
+            "SGMT,SGRP,SGRY,SGTX,SHBI,SHCA,SHCR,SHFS,SHLX,SHMD,SHOO,SHPW,"
+            "SIDU,SIEB,SILK,SILV,SILO,SIOX,SIRV,SITM,SJW,SKIL,SKLZ,SLCA,"
+            "SLDB,SLGL,SLNA,SLNO,SLRC,SLRN,SLRX,SLVM,SMBC,SMFL,SMMT,SMMF,"
+            "SMSI,SMTC,SMTI,SNBR,SNCE,SNDA,SNEX,SNGX,SNPO,SNPX,SNSE,SNSR,"
+            "SNST,SNTG,SNUG,SNVS,SODI,SOGP,SOLO,SONM,SONN,SOPA,SOUN,SPFI,"
+            "SPNE,SPNS,SPOK,SPPL,SPRB,SPRC,SPRO,SPRT,SPSC,SPTN,SPWH,SPXC,"
+            "SQNS,SQSP,SREV,SRMX,SRNE,SRPT,SRRK,SRTS,SSBI,SSBT,SSBK,SSFN,"
+            "SSNT,SSRM,SSSS,SSTI,SSYS,STAA,STAF,STBA,STCN,STGW,STIM,STKL,"
+            "STLA,STLC,STNE,STNG,STOK,STPC,STRL,STRN,STRO,STRR,STRS,STRT,"
+            "STSA,STXS,SUMO,SUNN,SUPV,SURG,SWAG,SWAV,SWBI,SWIR,SWKH,SYBT,"
+            "SYBX,SYNH,SYRA,SYTA,TACT,TAIT,TALO,TANH,TAOP,TARA,TBBB,TBBS,"
+            "TBIO,TBLM,TBLT,TBNK,TBPH,TCBC,TCBK,TCBS,TCDA,TCFC,TCMD,TCRR,"
+            "TCRX,TDAC,TDIV,TDOC,TDUP,TELA,TELL,TENK,TENX,TERN,TESS,TGLS,"
+            "TGNA,TGTX,THFF,THGS,THMO,THRY,TIAX,TILS,TIRX,TITN,TLIS,TLGA,"
+            "TLND,TLPH,TLRY,TMDI,TMDX,TMVW,TNYA,TOEM,TOGI,TOKN,TOLS,TOMZ,"
+            "TOPS,TOST,TOWR,TPBK,TPCO,TPIC,TPST,TRAK,TRCA,TRCN,TREE,TRES,"
+            "TRHC,TRIN,TRIP,TRIV,TRMK,TRNS,TRPH,TRPL,TRPX,TRST,TRTX,TRVG,"
+            "TRVN,TSBK,TSEM,TSHA,TSOI,TSRI,TTCF,TTGT,TTOO,TTSH,TUSK,TUYA,"
+            "TWST,TXMD,TXNM,TXPH,TXRH,TYME,UBCP,UBFO,UBOH,UBSI,UCBI,UCTT,"
+            "UDMY,UEIC,ULBI,ULCC,UMBF,UMPQ,UNFI,UNIT,UNTY,UONE,UONEK,UPBD,"
+            "UPHL,UPST,URBN,URGN,USAP,USAT,USBI,USEG,USFD,USIO,USLM,USPH,"
+            "UUUU,UVSP,VABK,VALU,VAXX,VCNX,VCSA,VCTR,VCYT,VECO,VEEV,VERI,"
+            "VERO,VIAV,VICR,VIOT,VIPS,VIRC,VIRI,VISL,VISM,VIST,VITL,VITX,"
+            "VIVK,VIVO,VLRS,VNET,VNRX,VOXX,VRAY,VRCA,VRDN,VREX,VRGX,VRNA,"
+            "VRPX,VSAC,VSCO,VSEC,VSTE,VTGN,VTOL,VTRS,VTSI,VTYX,VUZI,VVOS,"
+            "VXRT,VYGR,VYNT,WABC,WAFD,WAIT,WATT,WCLD,WDAY,WDFC,WEBR,WEGE,"
+            "WERN,WEYS,WFCF,WFRD,WGBS,WINT,WIRE,WISA,WISH,WISP,WKHS,WKME,"
+            "WLFC,WMRD,WNEB,WNNR,WOLF,WOOF,WORX,WRBY,WSBC,WSFS,WSTG,WSTL,"
+            "WTBA,WTFC,WTRG,WULF,WWAC,XBIT,XCUR,XELA,XELB,XENE,XENT,XERS,"
+            "XFOR,XINO,XNCR,XNET,XOMA,XONE,XPEV,XPLR,XPOA,XPOF,XPRO,XRTX,"
+            "XSPA,XTLB,XWEL,XXII,YETI,YGMZ,YMAB,YNDX,YOTA,YRCW,YTEN,YY,"
+            "ZEAL,ZEUS,ZFOX,ZGNX,ZIMV,ZLAB,ZNTH,ZNTL,ZSAN,ZUUS,ZVIA,ZVRA,"
+            "ZYME,ZYXI"
         )
-        tickers.update(t for t in embedded if 1 <= len(t) <= 5 and t.isalpha())
+        for t in fallback.replace("\n","").split(","):
+            t = t.strip()
+            if t and 1 <= len(t) <= 5 and t.isalpha():
+                tickers.add(t)
 
     return sorted(tickers)
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def fetch_single_ticker_stooq(ticker: str, start_date: str, end_date: str) -> pd.DataFrame | None:
-    """
-    Download OHLCV from Stooq for a single ticker.
-    URL format: https://stooq.com/q/d/l/?s=AAPL.US&d1=19950101&d2=20251231&i=d
-
-    Stooq symbol rules:
-      - Standard ticker:  AAPL  → aapl.us
-      - BRK-B style:      BRK-B → brk-b.us  (Stooq accepts the hyphen)
-      - Class shares:     GOOG  → goog.us
-    """
+def fetch_single(ticker: str, start_date: str, end_date: str):
+    """Download OHLCV from Stooq for one ticker."""
     try:
         s      = start_date.replace("-", "")
         e      = end_date.replace("-", "")
         symbol = f"{ticker.lower()}.us"
         url    = f"{STOOQ_BASE}?s={symbol}&d1={s}&d2={e}&i=d"
         r      = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
-
         if r.status_code != 200:
             return None
-
         text = r.text.strip()
         if len(text) < 30:
             return None
-
-        # Stooq returns these strings for bad/rate-limited tickers
-        bad_signals = ("No data", "Exceeded the daily", "<!DOCTYPE", "<html", "error")
-        if any(sig.lower() in text.lower() for sig in bad_signals):
+        bad = ("No data", "Exceeded the daily", "<!DOCTYPE", "<html", "error")
+        if any(b.lower() in text.lower() for b in bad):
             return None
-
         df = pd.read_csv(io.StringIO(text))
         if df.empty:
             return None
-
         df.columns = [c.strip().title() for c in df.columns]
-
-        # Stooq columns: Date, Open, High, Low, Close, Volume
         if "Date" not in df.columns or "Close" not in df.columns:
             return None
-
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
         df = df.dropna(subset=["Date"]).set_index("Date").sort_index()
-
-        if df.empty or len(df) < 20:
+        if len(df) < 20:
             return None
-
-        cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]
+        cols = [c for c in ["Open","High","Low","Close","Volume"] if c in df.columns]
         result = df[cols].apply(pd.to_numeric, errors="coerce").dropna(subset=["Close"])
         return result if not result.empty else None
-
     except Exception:
         return None
 
 
-def fetch_universe_parallel(
-    tickers: list[str],
-    start_date: str,
-    end_date: str,
-    progress_callback=None,
-    max_workers: int = MAX_WORKERS,
-) -> tuple[dict, list[str], list[str]]:
-    """
-    Download all tickers in parallel using a thread pool.
-    Returns (data_dict, found_list, missing_list).
-    data_dict keys: Open, High, Low, Close, Volume → each a DataFrame (index=dates, cols=tickers)
-    """
-    frames   = {c: {} for c in ["Open", "High", "Low", "Close", "Volume"]}
-    found    = []
-    missing  = []
-    total    = len(tickers)
-    done     = [0]
+def download_universe(tickers, start_date, end_date, progress_bar=None):
+    """Parallel download of all tickers. Returns (data_dict, found, missing)."""
+    frames  = {c: {} for c in ["Open","High","Low","Close","Volume"]}
+    found   = []
+    missing = []
+    total   = len(tickers)
+    done    = [0]
 
-    def _download(t):
-        return t, fetch_single_ticker_stooq(t, start_date, end_date)
+    def _get(t):
+        return t, fetch_single(t, start_date, end_date)
 
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = {ex.submit(_download, t): t for t in tickers}
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+        futures = {ex.submit(_get, t): t for t in tickers}
         for fut in as_completed(futures):
             ticker, df = fut.result()
             done[0] += 1
-            if progress_callback and done[0] % 50 == 0:
-                progress_callback(done[0] / total, f"Downloaded {done[0]}/{total} tickers…")
+            if progress_bar and done[0] % 100 == 0:
+                pct = done[0] / total
+                progress_bar.progress(pct, text=f"Downloaded {done[0]:,}/{total:,} tickers…")
             if df is not None and not df.empty:
-                for c in ["Open", "High", "Low", "Close", "Volume"]:
+                for c in ["Open","High","Low","Close","Volume"]:
                     if c in df.columns:
                         frames[c][ticker] = df[c]
                 found.append(ticker)
@@ -491,35 +316,22 @@ def fetch_universe_parallel(
         return {}, found, missing
 
     result = {}
-    for c in ["Open", "High", "Low", "Close", "Volume"]:
+    for c in ["Open","High","Low","Close","Volume"]:
         if frames[c]:
             result[c] = pd.DataFrame(frames[c]).sort_index()
 
     return result, found, missing
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def fetch_data_cached(tickers_tuple: tuple, start_date: str, end_date: str):
-    """
-    Cached wrapper around fetch_universe_parallel.
-    Accepts a tuple (hashable) of tickers so Streamlit can cache it.
-    Returns (data_dict, found, missing) — cached for 24 h.
-    """
-    tickers = list(tickers_tuple)
-    # We can't use progress_callback inside a cached function, so no progress here.
-    return fetch_universe_parallel(tickers, start_date, end_date, progress_callback=None)
-
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def fetch_etf_stooq(ticker: str, start_date: str, end_date: str) -> pd.Series | None:
-    """Fetch a single ETF series (QQQ/SPY) from Stooq."""
-    df = fetch_single_ticker_stooq(ticker, start_date, end_date)
+def fetch_etf(ticker, start_date, end_date):
+    """Fetch ETF price series, fallback to yfinance."""
+    df = fetch_single(ticker, str(start_date), str(end_date))
     if df is not None and "Close" in df.columns:
         return df["Close"]
-    # Fallback to yfinance
     try:
         import yfinance as yf
-        raw = yf.download(ticker, start=start_date, end=end_date, auto_adjust=True, progress=False)
+        raw = yf.download(ticker, start=str(start_date), end=str(end_date),
+                          auto_adjust=True, progress=False)
         if not raw.empty:
             return raw["Close"].squeeze()
     except Exception:
@@ -528,23 +340,77 @@ def fetch_etf_stooq(ticker: str, start_date: str, end_date: str) -> pd.Series | 
 
 
 # ─────────────────────────────────────────────
+# AUTO-LOAD DATA ON APP START
+# Downloads everything once when the app opens.
+# Stored in st.session_state so all tabs share it.
+# ─────────────────────────────────────────────
+def ensure_data_loaded(start_date, end_date):
+    """
+    Called at the top of every page render.
+    If data is not yet in session state, downloads it now.
+    Uses a status banner so the user knows what's happening.
+    """
+    key_data   = f"data_{start_date}_{end_date}"
+    key_found  = f"found_{start_date}_{end_date}"
+    key_miss   = f"missing_{start_date}_{end_date}"
+    key_tickers= "all_tickers"
+
+    # Load ticker list if not cached
+    if key_tickers not in st.session_state:
+        with st.spinner("Loading ticker universe from NASDAQ directory…"):
+            st.session_state[key_tickers] = get_ticker_list()
+
+    all_tickers = st.session_state[key_tickers]
+
+    # Download price data if not cached for this date range
+    if key_data not in st.session_state:
+        n = len(all_tickers)
+        banner = st.info(
+            f"⏳ First-time data load: downloading **{n:,} tickers** from Stooq.com "
+            f"({start_date} → {end_date}). This takes 2–5 minutes and is cached for 24 hours."
+        )
+        prog = st.progress(0, text=f"Starting parallel downloads (0/{n:,})…")
+        data, found, missing = download_universe(
+            all_tickers, str(start_date), str(end_date),
+            progress_bar=prog
+        )
+        prog.empty()
+        banner.empty()
+        st.session_state[key_data]    = data
+        st.session_state[key_found]   = found
+        st.session_state[key_miss]    = missing
+        hit = len(found) / max(len(all_tickers), 1) * 100
+        st.success(
+            f"✅ Data ready — **{len(found):,}/{n:,}** tickers loaded ({hit:.0f}% hit rate). "
+            f"All tabs will use this data."
+        )
+
+    return (
+        st.session_state[key_tickers],
+        st.session_state[key_data],
+        st.session_state[key_found],
+        st.session_state[key_miss],
+    )
+
+
+# ─────────────────────────────────────────────
 # BACKTEST ENGINE
 # ─────────────────────────────────────────────
 def run_backtest(data, tickers, params, initial_capital, strategy_mode="atr", progress_bar=None):
-    bp   = params["breakout_period"]
-    ap   = params["atr_period"]
-    am   = params["atr_mult"]
-    ms   = params["min_spacing"]
-    ma   = params["max_age"]
-    mp   = params["max_pyramid"]
-    s2   = params["sma200"]
-    s5   = params["sma50"]
-    vmp  = params["vol_ma_period"]
-    vsm  = params["vol_spike_mult"]
-    mav  = params["min_avg_vol"]
-    brp  = params["base_risk_pct"]
-    mnp  = params["min_price"]
-    rev  = params.get("stop_review_bars", 10)
+    bp  = params["breakout_period"]
+    ap  = params["atr_period"]
+    am  = params["atr_mult"]
+    ms  = params["min_spacing"]
+    ma  = params["max_age"]
+    mp  = params["max_pyramid"]
+    s2  = params["sma200"]
+    s5  = params["sma50"]
+    vmp = params["vol_ma_period"]
+    vsm = params["vol_spike_mult"]
+    mav = params["min_avg_vol"]
+    brp = params["base_risk_pct"]
+    mnp = params["min_price"]
+    rev = params.get("stop_review_bars", 10)
 
     raw   = []
     close = data.get("Close", pd.DataFrame())
@@ -555,7 +421,7 @@ def run_backtest(data, tickers, params, initial_capital, strategy_mode="atr", pr
 
     for idx, ticker in enumerate(valid):
         if progress_bar:
-            progress_bar.progress((idx + 1) / total, text=f"Scanning {ticker}…")
+            progress_bar.progress((idx+1)/total, text=f"Scanning {ticker}…")
         try:
             c   = data["Close"][ticker].dropna()
             o   = data["Open"][ticker].reindex(c.index).ffill()
@@ -567,7 +433,7 @@ def run_backtest(data, tickers, params, initial_capital, strategy_mode="atr", pr
             if len(c) < mb:
                 continue
 
-            tr     = pd.concat([h - lo, (h - c.shift(1)).abs(), (lo - c.shift(1)).abs()], axis=1).max(axis=1)
+            tr     = pd.concat([h-lo, (h-c.shift(1)).abs(), (lo-c.shift(1)).abs()], axis=1).max(axis=1)
             atr    = tr.ewm(span=ap, adjust=False).mean()
             sma200 = c.rolling(s2).mean()
             sma50  = c.rolling(s5).mean()
@@ -581,8 +447,7 @@ def run_backtest(data, tickers, params, initial_capital, strategy_mode="atr", pr
 
             in_t  = False
             slvl  = entry = hbh = hba = np.nan
-            age   = bsa = pyc = 0
-            bsr   = 0
+            age   = bsa = pyc = bsr = 0
             high_since_review = np.nan
 
             for j in range(mb, len(c)):
@@ -590,16 +455,15 @@ def run_backtest(data, tickers, params, initial_capital, strategy_mode="atr", pr
                 cb = cbh.iloc[j] if strategy_mode == "atr" else hv
                 hb = hb52.iloc[j]; av = atr.iloc[j]
                 v2 = sma200.iloc[j]; v5 = sma50.iloc[j]
-                vl = vol.iloc[j];  vm = volma.iloc[j]
+                vl = vol.iloc[j]; vm = volma.iloc[j]
                 dt = c.index[j]
 
                 if pd.isna(hb) or pd.isna(av) or pd.isna(v2):
                     continue
 
                 sd = am * av
-                ok = vm >= mav
-                vs = vl >= vm * vsm
-                a2 = cv > v2; a5 = cv > v5; px = cv >= mnp
+                ok = vm >= mav; vs = vl >= vm * vsm
+                a2 = cv > v2;   a5 = cv > v5; px = cv >= mnp
 
                 if strategy_mode == "atr":
                     esig = cb >= hb and a2 and a5 and not in_t and vs and ok and px
@@ -618,7 +482,7 @@ def run_backtest(data, tickers, params, initial_capital, strategy_mode="atr", pr
                     raw.append({
                         "ticker": ticker, "entry_date": dt,
                         "entry_price": cv, "stop_dist": sd,
-                        "rel_vol": vl / vm if vm > 0 else 1.0,
+                        "rel_vol": vl/vm if vm > 0 else 1.0,
                         "exit_date": None, "exit_price": None,
                         "exit_type": None, "pyramid_adds": 0,
                         "trade_age": 0, "_qty": 0, "_eq": 0.0,
@@ -631,8 +495,7 @@ def run_backtest(data, tickers, params, initial_capital, strategy_mode="atr", pr
                         if s["ticker"] == ticker and s["exit_date"] is None:
                             s["exit_date"]    = dt; s["exit_price"] = xp
                             s["exit_type"]    = xt; s["pyramid_adds"] = pyc
-                            s["trade_age"]    = age
-                            break
+                            s["trade_age"]    = age; break
                     in_t  = False
                     slvl  = entry = hbh = hba = np.nan
                     age   = bsa = pyc = bsr = 0
@@ -673,11 +536,10 @@ def run_backtest(data, tickers, params, initial_capital, strategy_mode="atr", pr
     if not raw:
         return pd.DataFrame()
 
-    # Portfolio simulation — 2:1 leverage
     LEVERAGE = 2.0
     raw.sort(key=lambda x: (x["entry_date"], -x.get("rel_vol", 0)))
     eq = float(initial_capital); bp_ = eq * LEVERAGE
-    open_  = {}; trades = []; taken = set()
+    open_ = {}; trades = []; taken = set()
 
     all_dates = sorted(set([s["entry_date"] for s in raw] + [s["exit_date"] for s in raw]))
     by_entry  = defaultdict(list)
@@ -697,7 +559,7 @@ def run_backtest(data, tickers, params, initial_capital, strategy_mode="atr", pr
                 "entry_price":     round(s["entry_price"], 4),
                 "exit_price":      round(s["exit_price"], 4),
                 "qty":             s["_qty"],
-                "pnl_pct":         round((s["exit_price"] - s["entry_price"]) / s["entry_price"] * 100, 4),
+                "pnl_pct":         round((s["exit_price"]-s["entry_price"])/s["entry_price"]*100, 4),
                 "pnl_dollar":      round(pnl, 4),
                 "exit_type":       s["exit_type"],
                 "pyramid_adds":    s["pyramid_adds"],
@@ -711,7 +573,7 @@ def run_backtest(data, tickers, params, initial_capital, strategy_mode="atr", pr
         for s in by_entry[dt]:
             sd = s["stop_dist"]
             if sd <= 0 or pd.isna(sd) or s["ticker"] in open_: continue
-            qty  = max(1, int(eq * (brp / 100) / sd))
+            qty  = max(1, int(eq * (brp/100) / sd))
             need = qty * s["entry_price"]
             if need > bp_: continue
             taken.add(id(s)); s["_qty"] = qty; s["_eq"] = eq
@@ -739,21 +601,21 @@ def compute_metrics(df, initial_capital, start_date, end_date):
         equity[equity.index >= t["exit_date"]] = initial_capital + cum
     tr   = (equity.iloc[-1] - equity.iloc[0]) / equity.iloc[0]
     ny   = (pd.to_datetime(end_date) - pd.to_datetime(start_date)).days / 365.25
-    cagr = (1 + tr) ** (1 / ny) - 1 if ny > 0 else 0
+    cagr = (1+tr)**(1/ny)-1 if ny > 0 else 0
     dr   = equity.pct_change().dropna()
-    sh   = dr.mean() / dr.std() * np.sqrt(252) if dr.std() > 0 else 0
+    sh   = dr.mean()/dr.std()*np.sqrt(252) if dr.std() > 0 else 0
     ds   = dr[dr < 0].std()
-    so   = dr.mean() / ds * np.sqrt(252) if ds > 0 else 0
+    so   = dr.mean()/ds*np.sqrt(252) if ds > 0 else 0
     rm   = equity.cummax(); dd = (equity - rm) / rm; mdd = dd.min()
-    cal  = cagr / abs(mdd) if mdd != 0 else 0
+    cal  = cagr/abs(mdd) if mdd != 0 else 0
     wins = df[df["pnl_dollar"] > 0]; loss = df[df["pnl_dollar"] <= 0]
-    wr   = len(wins) / len(df) * 100 if len(df) > 0 else 0
+    wr   = len(wins)/len(df)*100 if len(df) > 0 else 0
     aw   = wins["pnl_pct"].mean() if len(wins) > 0 else 0
     al   = loss["pnl_pct"].mean() if len(loss) > 0 else 0
     gp   = wins["pnl_dollar"].sum() if len(wins) > 0 else 0
     gl   = abs(loss["pnl_dollar"].sum()) if len(loss) > 0 else 1
-    pf   = gp / gl if gl > 0 else 0
-    exp  = (wr / 100 * aw) + ((1 - wr / 100) * al)
+    pf   = gp/gl if gl > 0 else 0
+    exp  = (wr/100*aw) + ((1-wr/100)*al)
     return {
         "Total Return":  f"{tr*100:.2f}%",
         "CAGR":          f"{cagr*100:.2f}%",
@@ -775,31 +637,26 @@ def compute_metrics(df, initial_capital, start_date, end_date):
 # BENCHMARKS
 # ─────────────────────────────────────────────
 def compute_dca(ticker, initial_capital, monthly, start_date, end_date):
-    prices = fetch_etf_stooq(ticker, str(start_date), str(end_date))
-    if prices is None:
-        return None
+    prices = fetch_etf(ticker, str(start_date), str(end_date))
+    if prices is None: return None
     idx    = pd.date_range(start=start_date, end=end_date, freq="B")
     prices = prices.reindex(idx).ffill().bfill()
-    if prices.isna().all() or prices.iloc[0] == 0:
-        return None
+    if prices.isna().all() or prices.iloc[0] == 0: return None
     shares    = initial_capital / prices.iloc[0]
     eq        = pd.Series(index=idx, dtype=float)
     eq.iloc[0]= shares * prices.iloc[0]
     last_m    = prices.index[0].month
     for i, dt in enumerate(prices.index[1:], 1):
         if dt.month != last_m:
-            shares += monthly / prices.iloc[i]
-            last_m  = dt.month
+            shares += monthly / prices.iloc[i]; last_m = dt.month
         eq.iloc[i] = shares * prices.iloc[i]
     return eq
 
 def add_monthly(equity, monthly):
-    if monthly <= 0:
-        return equity
+    if monthly <= 0: return equity
     eq = equity.copy().astype(float); last_m = eq.index[0].month; cum = 0.0
     for i, dt in enumerate(eq.index[1:], 1):
-        if dt.month != last_m:
-            cum += monthly; last_m = dt.month
+        if dt.month != last_m: cum += monthly; last_m = dt.month
         eq.iloc[i] += cum
     return eq
 
@@ -807,23 +664,16 @@ def add_monthly(equity, monthly):
 # ─────────────────────────────────────────────
 # CHARTS
 # ─────────────────────────────────────────────
-COLORS = {
-    "atr":   "#00e5b3",
-    "mtp":   "#4a90d9",
-    "10bar": "#f5a623",
-    "qqq":   "#a855f7",
-    "spy":   "#6b7fa3",
-}
+COLORS = {"atr": "#00e5b3", "mtp": "#4a90d9", "10bar": "#f5a623", "qqq": "#a855f7", "spy": "#6b7fa3"}
 
 def chart_comparison(results, qqq=None, spy=None, monthly=0):
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                        row_heights=[0.72, 0.28], vertical_spacing=0.03)
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.72, 0.28], vertical_spacing=0.03)
     names = {"atr": "S1: ATR Trailing", "mtp": "S2: MTP Static", "10bar": "S3: 10-Bar Static"}
     for mode, (equity, dd) in results.items():
         strat = add_monthly(equity, monthly)
         fig.add_trace(go.Scatter(x=strat.index, y=strat.values,
             line=dict(color=COLORS[mode], width=2), name=names[mode]), row=1, col=1)
-        fig.add_trace(go.Scatter(x=dd.index, y=dd.values * 100,
+        fig.add_trace(go.Scatter(x=dd.index, y=dd.values*100,
             line=dict(color=COLORS[mode], width=1, dash="dot"),
             name=f"{names[mode]} DD", showlegend=False), row=2, col=1)
     if qqq is not None:
@@ -833,9 +683,8 @@ def chart_comparison(results, qqq=None, spy=None, monthly=0):
         fig.add_trace(go.Scatter(x=spy.index, y=spy.values,
             line=dict(color=COLORS["spy"], width=1.5, dash="dot"), name="SPY DCA"), row=1, col=1)
     fig.update_layout(paper_bgcolor="#0a0e17", plot_bgcolor="#0a0e17",
-        font=dict(color="#e8eaf0"), margin=dict(l=0, r=0, t=10, b=0), height=480,
-        showlegend=True, legend=dict(bgcolor="rgba(10,14,23,0.9)",
-                                     bordercolor="#1e2d4a", borderwidth=1, x=0.01, y=0.99))
+        font=dict(color="#e8eaf0"), margin=dict(l=0,r=0,t=10,b=0), height=480,
+        showlegend=True, legend=dict(bgcolor="rgba(10,14,23,0.9)", bordercolor="#1e2d4a", borderwidth=1, x=0.01, y=0.99))
     fig.update_xaxes(gridcolor="#141b2d"); fig.update_yaxes(gridcolor="#141b2d")
     fig.update_yaxes(title_text="Portfolio ($)", row=1, col=1)
     fig.update_yaxes(title_text="Drawdown (%)", row=2, col=1)
@@ -846,21 +695,18 @@ def chart_annual(equity, color, name):
     colors = [color if v >= 0 else "#ff5555" for v in ann.values]
     fig    = go.Figure(go.Bar(x=ann.index.year, y=ann.values, marker_color=colors, name=name))
     fig.update_layout(paper_bgcolor="#0a0e17", plot_bgcolor="#0a0e17",
-        font=dict(color="#e8eaf0"), margin=dict(l=0, r=0, t=10, b=0), height=280,
-        xaxis_title="Year", yaxis_title="Return (%)", title=name,
-        title_font=dict(color=color))
+        font=dict(color="#e8eaf0"), margin=dict(l=0,r=0,t=10,b=0), height=280,
+        xaxis_title="Year", yaxis_title="Return (%)", title=name, title_font=dict(color=color))
     fig.update_xaxes(gridcolor="#141b2d")
     fig.update_yaxes(gridcolor="#141b2d", zeroline=True, zerolinecolor="#2a3550")
     return fig
 
 def chart_dist(df, color, name):
-    if df.empty:
-        return go.Figure()
+    if df.empty: return go.Figure()
     fig = px.histogram(df, x="pnl_pct", nbins=60, color_discrete_sequence=[color],
                        labels={"pnl_pct": "Trade Return (%)"}, title=name)
     fig.update_layout(paper_bgcolor="#0a0e17", plot_bgcolor="#0a0e17",
-        font=dict(color="#e8eaf0"), margin=dict(l=0, r=0, t=30, b=0), height=280,
-        title_font=dict(color=color))
+        font=dict(color="#e8eaf0"), margin=dict(l=0,r=0,t=30,b=0), height=280, title_font=dict(color=color))
     fig.update_xaxes(gridcolor="#141b2d"); fig.update_yaxes(gridcolor="#141b2d")
     return fig
 
@@ -880,24 +726,23 @@ def suggest(space, past, n_start=10):
         p = {}
         for k, (lo, hi, step, typ) in space.items():
             if typ == "int":
-                p[k] = int(np.random.choice(range(lo, hi + 1, step)))
+                p[k] = int(np.random.choice(range(lo, hi+1, step)))
             else:
-                n = int(round((hi - lo) / step))
-                p[k] = round(lo + np.random.randint(0, n + 1) * step, 4)
+                n = int(round((hi-lo)/step))
+                p[k] = round(lo + np.random.randint(0, n+1)*step, 4)
         return p
-    if len(past) < n_start:
-        return uniform()
+    if len(past) < n_start: return uniform()
     best = max(past, key=lambda x: x["score"])["params"]
     p = {}
     for k, (lo, hi, step, typ) in space.items():
         if typ == "int":
-            noise = int(np.random.choice([-2, -1, 0, 0, 1, 2])) * step
-            val   = int(np.clip(best[k] + noise, lo, hi))
-            p[k]  = min(range(lo, hi + 1, step), key=lambda x: abs(x - val))
+            noise = int(np.random.choice([-2,-1,0,0,1,2])) * step
+            val   = int(np.clip(best[k]+noise, lo, hi))
+            p[k]  = min(range(lo, hi+1, step), key=lambda x: abs(x-val))
         else:
-            val   = round(np.clip(best[k] + np.random.uniform(-(hi - lo) * 0.15, (hi - lo) * 0.15), lo, hi), 4)
-            n     = int(round((val - lo) / step))
-            p[k]  = round(lo + n * step, 4)
+            val   = round(np.clip(best[k] + np.random.uniform(-(hi-lo)*0.15, (hi-lo)*0.15), lo, hi), 4)
+            n     = int(round((val-lo)/step))
+            p[k]  = round(lo + n*step, 4)
     return p
 
 
@@ -907,58 +752,39 @@ def suggest(space, past, n_start=10):
 with st.sidebar:
     st.markdown("## ⚙️ Settings")
 
-    with st.expander("📊 Universe & Data", expanded=True):
-        st.caption("Data source: **Stooq.com** — bulk zip discovery, cached 24h")
-
-        universe = st.selectbox("Universe", ["All (NYSE + Nasdaq ~8k)", "Custom"])
-        custom_tickers = []
-        if universe == "Custom":
-            raw_input      = st.text_area("Tickers (comma-separated)", "AAPL, MSFT, NVDA")
-            custom_tickers = [t.strip().upper() for t in raw_input.split(",") if t.strip()]
-
-        if "All" in universe:
-            with st.spinner("Loading ticker universe…"):
-                all_tickers = get_stooq_ticker_list()
-            n = len(all_tickers)
-            if n >= 4000:
-                st.success(f"✅ {n:,} tickers (NYSE + Nasdaq, live from NASDAQ directory)")
-            else:
-                st.warning(f"⚠️ {n:,} tickers (NASDAQ directory unreachable — using embedded fallback)")
-        else:
-            all_tickers = []
-
+    with st.expander("📊 Data", expanded=True):
         c1, c2 = st.columns(2)
         with c1: start_date = st.date_input("Start", datetime(1995, 1, 1))
         with c2: end_date   = st.date_input("End",   datetime.today())
+        initial_capital      = st.number_input("Capital ($)", min_value=1000, value=10000, step=1000)
+        monthly_contribution = st.number_input("Monthly Add ($)", min_value=0, value=500, step=100)
+        st.caption("Data auto-loads on first open and is shared across all tabs.")
 
-        initial_capital      = st.number_input("Capital ($)",      min_value=1000,   value=10000, step=1000)
-        monthly_contribution = st.number_input("Monthly Add ($)",  min_value=0,      value=500,   step=100)
-
-    with st.expander("🔀 Strategy Selection", expanded=True):
+    with st.expander("🔀 Strategies", expanded=True):
         run_s1   = st.toggle("S1 — ATR Trailing Stop",  value=True)
         run_s2   = st.toggle("S2 — MTP Static Stop",    value=True)
         run_s3   = st.toggle("S3 — 10-Bar Static Stop", value=True)
         show_qqq = st.toggle("Show QQQ benchmark",      value=True)
         show_spy = st.toggle("Show SPY benchmark",       value=True)
 
-    with st.expander("🎯 Strategy Parameters", expanded=True):
-        breakout_period  = st.number_input("52W Lookback",            10,  504,  252)
-        atr_period       = st.number_input("ATR Period",              1,   500,  293)
-        atr_mult         = st.number_input("ATR Multiplier",          0.1, 20.0, 7.25, step=0.05)
-        max_pyramid      = st.number_input("Max Pyramid Adds",        0,   20,   5)
-        min_spacing      = st.number_input("Min Bars Between Adds",   1,   100,  38)
-        max_age          = st.number_input("Max Trade Age (bars)",    10,  2000, 584)
-        base_risk_pct    = st.number_input("Risk % per Trade",        0.1, 10.0, 2.0,  step=0.25)
-        stop_review_bars = st.number_input("Stop Review Interval (S3)", 1, 50,   10)
+    with st.expander("🎯 Parameters", expanded=True):
+        breakout_period  = st.number_input("52W Lookback",           10,  504,  252)
+        atr_period       = st.number_input("ATR Period",             1,   500,  293)
+        atr_mult         = st.number_input("ATR Multiplier",         0.1, 20.0, 7.25, step=0.05)
+        max_pyramid      = st.number_input("Max Pyramid Adds",       0,   20,   5)
+        min_spacing      = st.number_input("Min Bars Between Adds",  1,   100,  38)
+        max_age          = st.number_input("Max Trade Age (bars)",   10,  2000, 584)
+        base_risk_pct    = st.number_input("Risk % per Trade",       0.1, 10.0, 2.0,  step=0.25)
+        stop_review_bars = st.number_input("Stop Review Bars (S3)",  1,   50,   10)
 
     with st.expander("📈 Moving Averages", expanded=True):
-        sma200 = st.number_input("Trend SMA Period",   1, 500, 200)
-        sma50  = st.number_input("Context SMA Period", 1, 300, 50)
+        sma200 = st.number_input("Trend SMA",   1, 500, 200)
+        sma50  = st.number_input("Context SMA", 1, 300, 50)
 
     with st.expander("🔊 Volume"):
-        vol_ma_period  = st.number_input("Volume MA Period",       5,  100,        20)
-        vol_spike_mult = st.number_input("Volume Spike Multiplier",1.0, 5.0,       1.5, step=0.1)
-        min_avg_vol    = st.number_input("Min Avg Volume",         0,   10_000_000, 1_000_000, step=100_000)
+        vol_ma_period  = st.number_input("Volume MA Period",    5,  100,        20)
+        vol_spike_mult = st.number_input("Vol Spike Mult",      1.0, 5.0,       1.5, step=0.1)
+        min_avg_vol    = st.number_input("Min Avg Volume",      0,   10_000_000, 1_000_000, step=100_000)
 
     with st.expander("🔍 Price"):
         min_price = st.number_input("Min Price ($)", 0.0, 500.0, 10.0, step=0.5)
@@ -968,12 +794,21 @@ with st.sidebar:
 
 
 # ─────────────────────────────────────────────
-# MAIN
+# AUTO-LOAD DATA (runs every page render)
 # ─────────────────────────────────────────────
 st.markdown("# 📈 Stock Trend Trader — Strategy Comparison")
-st.markdown("*Compare ATR Trailing · MTP Static · 10-Bar Static · vs QQQ & SPY benchmarks*")
+st.markdown("*ATR Trailing · MTP Static · 10-Bar Static · vs QQQ & SPY*")
 st.markdown("---")
 
+all_tickers, data, found, missing = ensure_data_loaded(start_date, end_date)
+
+if found:
+    st.caption(f"📂 **{len(found):,}** tickers loaded from Stooq ({start_date} → {end_date}) — ready to backtest")
+
+
+# ─────────────────────────────────────────────
+# TABS
+# ─────────────────────────────────────────────
 main_tab1, main_tab2 = st.tabs(["📊 Strategy Comparison", "🔬 Optimization"])
 
 
@@ -983,22 +818,19 @@ main_tab1, main_tab2 = st.tabs(["📊 Strategy Comparison", "🔬 Optimization"]
 with main_tab1:
     if not run_btn:
         st.markdown("""<div class="info-banner">
-        Data is fetched directly from <strong>Stooq.com</strong> and cached for 24 hours.<br>
-        The first run over the full universe (~8 000 tickers) takes a few minutes; subsequent runs are instant.<br>
-        Toggle strategies in the sidebar, then click <strong>Run Comparison</strong>.
+        Data is already loaded — just click <strong>Run Comparison</strong> to start.<br>
+        Toggle strategies and adjust parameters in the sidebar. All 3 strategies run with identical settings.
         </div>""", unsafe_allow_html=True)
-
         c1, c2, c3 = st.columns(3)
         with c1:
-            st.markdown("""**S1 — ATR Trailing Stop** 🟢
-Stop ratchets up every bar from the highest candle body high since entry.""")
+            st.markdown("""**S1 — ATR Trailing** 🟢
+Stop ratchets up every bar from highest candle body high since entry.""")
         with c2:
-            st.markdown("""**S2 — MTP Static Stop** 🔵
-Stop is frozen between pyramid adds — only resets when an add fires.""")
+            st.markdown("""**S2 — MTP Static** 🔵
+Stop frozen between adds. Only resets to close − ATR when an add fires.""")
         with c3:
-            st.markdown("""**S3 — 10-Bar Static Stop** 🟠
-Stop reviews every N bars; only updates if a new high was made in that window.""")
-
+            st.markdown("""**S3 — 10-Bar Static** 🟠
+Stop reviews every N bars. Only updates if new high made in that window.""")
     else:
         active = []
         if run_s1: active.append("atr")
@@ -1007,6 +839,10 @@ Stop reviews every N bars; only updates if a new high was made in that window.""
 
         if not active:
             st.error("Select at least one strategy.")
+            st.stop()
+
+        if not data:
+            st.error("No data loaded. Check your internet connection and reload the page.")
             st.stop()
 
         params = {
@@ -1026,51 +862,21 @@ Stop reviews every N bars; only updates if a new high was made in that window.""
             "stop_review_bars": stop_review_bars,
         }
 
-        tickers = custom_tickers if universe == "Custom" else all_tickers
-        if not tickers:
-            st.error("No tickers loaded. Check your universe selection or Stooq connectivity.")
-            st.stop()
-
-        st.info(f"Universe: **{len(tickers)} tickers** | Strategies: **{len(active)}** | {start_date} → {end_date}")
-
-        # ── Data loading with parallel threads ──
-        load_placeholder = st.empty()
-        load_placeholder.info("⏳ Downloading data from Stooq… (first run takes ~2–5 min for full universe)")
-
-        prog = st.progress(0, text="Starting parallel downloads…")
-
-        # Use the non-cached version so we can show progress, then cache the result
-        data, found, missing = fetch_universe_parallel(
-            tickers, str(start_date), str(end_date),
-            progress_callback=lambda pct, txt: prog.progress(pct, text=txt),
-        )
-        prog.empty()
-        load_placeholder.empty()
-
-        if not data:
-            st.error("No data downloaded from Stooq. Check your internet connection.")
-            st.stop()
-
-        hit_rate = len(found) / len(tickers) * 100
-        st.success(f"✅ Downloaded **{len(found)}/{len(tickers)}** tickers ({hit_rate:.0f}% hit rate) — {len(missing)} not found on Stooq")
+        st.info(f"**{len(found):,} tickers** | **{len(active)} strategies** | {start_date} → {end_date}")
 
         mode_names  = {"atr": "S1: ATR Trailing", "mtp": "S2: MTP Static", "10bar": "S3: 10-Bar Static"}
         mode_colors = {"atr": COLORS["atr"], "mtp": COLORS["mtp"], "10bar": COLORS["10bar"]}
 
-        all_results = {}
-        all_metrics = {}
-        all_trades  = {}
+        all_results = {}; all_metrics = {}; all_trades = {}
 
         for mode in active:
             with st.spinner(f"Running {mode_names[mode]}…"):
                 prog   = st.progress(0, text=f"Scanning for {mode_names[mode]}…")
                 trades = run_backtest(data, found, params, initial_capital, mode, prog)
                 prog.empty()
-
             if trades.empty:
                 st.warning(f"{mode_names[mode]}: No trades generated.")
                 continue
-
             metrics, equity, drawdown = compute_metrics(trades, initial_capital, start_date, end_date)
             all_results[mode] = (equity, drawdown)
             all_metrics[mode] = metrics
@@ -1080,7 +886,6 @@ Stop reviews every N bars; only updates if a new high was made in that window.""
             st.warning("No results for any strategy.")
             st.stop()
 
-        # Benchmarks
         qqq_eq = spy_eq = None
         if show_qqq:
             with st.spinner("Loading QQQ…"):
@@ -1089,10 +894,8 @@ Stop reviews every N bars; only updates if a new high was made in that window.""
             with st.spinner("Loading SPY…"):
                 spy_eq = compute_dca("SPY", initial_capital, monthly_contribution, start_date, end_date)
 
-        # Equity curve
         st.markdown('<div class="section-header">📈 Equity Curve Comparison</div>', unsafe_allow_html=True)
-        st.plotly_chart(chart_comparison(all_results, qqq_eq, spy_eq, monthly_contribution),
-                        use_container_width=True)
+        st.plotly_chart(chart_comparison(all_results, qqq_eq, spy_eq, monthly_contribution), use_container_width=True)
 
         n_months = (pd.to_datetime(end_date) - pd.to_datetime(start_date)).days / 30.44
         total_in = initial_capital + monthly_contribution * n_months
@@ -1106,18 +909,16 @@ Stop reviews every N bars; only updates if a new high was made in that window.""
         for i, key in enumerate(all_cols):
             with cols[i]:
                 if key == "qqq":
-                    st.markdown(mc("QQQ Final Value", f"${qqq_eq.iloc[-1]:,.0f}", color=COLORS["qqq"]), unsafe_allow_html=True)
+                    st.markdown(mc("QQQ Final", f"${qqq_eq.iloc[-1]:,.0f}", color=COLORS["qqq"]), unsafe_allow_html=True)
                 elif key == "spy":
-                    st.markdown(mc("SPY Final Value", f"${spy_eq.iloc[-1]:,.0f}", color=COLORS["spy"]), unsafe_allow_html=True)
+                    st.markdown(mc("SPY Final", f"${spy_eq.iloc[-1]:,.0f}", color=COLORS["spy"]), unsafe_allow_html=True)
                 else:
                     final = add_monthly(all_results[key][0], monthly_contribution).iloc[-1]
                     st.markdown(mc(f"{mode_names[key]} Final", f"${final:,.0f}", color=mode_colors[key]), unsafe_allow_html=True)
 
-        # Metrics table
         st.markdown('<div class="section-header">📊 Performance Metrics</div>', unsafe_allow_html=True)
         metric_keys = ["CAGR","Sharpe","Calmar","Max Drawdown","Total Trades","Win Rate","Profit Factor","Expectancy"]
         pos_good    = [True, True, True, False, True, True, True, True]
-
         cols = st.columns(len(all_results))
         for i, (mode, metrics) in enumerate(all_metrics.items()):
             with cols[i]:
@@ -1125,21 +926,18 @@ Stop reviews every N bars; only updates if a new high was made in that window.""
                 for mk, pg in zip(metric_keys, pos_good):
                     st.markdown(mc(mk, metrics[mk], pg), unsafe_allow_html=True)
 
-        # Annual returns
         st.markdown('<div class="section-header">📅 Annual Returns</div>', unsafe_allow_html=True)
         cols = st.columns(len(all_results))
         for i, (mode, (equity, _)) in enumerate(all_results.items()):
             with cols[i]:
                 st.plotly_chart(chart_annual(equity, mode_colors[mode], mode_names[mode]), use_container_width=True)
 
-        # Trade distribution
         st.markdown('<div class="section-header">📦 Trade Distribution</div>', unsafe_allow_html=True)
         cols = st.columns(len(all_results))
         for i, (mode, trades) in enumerate(all_trades.items()):
             with cols[i]:
                 st.plotly_chart(chart_dist(trades, mode_colors[mode], mode_names[mode]), use_container_width=True)
 
-        # Trade logs
         st.markdown('<div class="section-header">📋 Trade Logs</div>', unsafe_allow_html=True)
         trade_tabs = st.tabs([mode_names[m] for m in all_trades.keys()])
         for tab, (mode, trades) in zip(trade_tabs, all_trades.items()):
@@ -1156,24 +954,19 @@ Stop reviews every N bars; only updates if a new high was made in that window.""
 
 # ══════════════════════════════════════════
 # TAB 2 — OPTIMIZATION
+# Uses the same already-loaded data — no re-download
 # ══════════════════════════════════════════
 with main_tab2:
     st.markdown("### 🔬 Parameter Optimization")
     st.markdown("""<div class="info-banner">
-    Optimize parameters for a chosen strategy. Run multiple times with different metrics,
-    then find your middle ground manually.
+    Uses the same data already loaded on startup — no extra downloads needed.
+    Run multiple times with different metrics, then find your middle ground manually.
     </div>""", unsafe_allow_html=True)
 
     oc1, oc2, oc3 = st.columns(3)
     with oc1: opt_metric   = st.selectbox("Optimize For", ["Calmar","Sharpe","CAGR","Profit Factor"])
-    with oc2: opt_strategy = st.selectbox("Strategy to Optimize", ["S1: ATR Trailing","S2: MTP Static","S3: 10-Bar Static"])
+    with oc2: opt_strategy = st.selectbox("Strategy", ["S1: ATR Trailing","S2: MTP Static","S3: 10-Bar Static"])
     with oc3: n_trials     = st.number_input("Trials", 5, 200, 30, step=5)
-
-    opt_universe = st.selectbox("Universe", ["All (NYSE + Nasdaq ~8k)","Custom"], key="ou")
-    custom_opt   = []
-    if opt_universe == "Custom":
-        ci         = st.text_area("Tickers", "AAPL, MSFT, NVDA", key="ct")
-        custom_opt = [t.strip().upper() for t in ci.split(",") if t.strip()]
 
     st.markdown("#### Search Ranges")
     sr1, sr2 = st.columns(2)
@@ -1181,29 +974,40 @@ with main_tab2:
         bp_r = st.slider("52W Lookback",         50,   504,  (150, 350), step=10)
         ap_r = st.slider("ATR Period",            10,   400,  (150, 350), step=5)
         am_r = st.slider("ATR Multiplier",        2.0,  15.0, (5.0, 10.0), step=0.5)
-        mp_r = st.slider("Max Pyramid Adds",      0,    15,   (2, 8),     step=1)
-        ms_r = st.slider("Min Bars Between Adds", 5,    80,   (20, 50),   step=1)
+        mp_r = st.slider("Max Pyramid Adds",      0,    15,   (2, 8),    step=1)
+        ms_r = st.slider("Min Bars Between Adds", 5,    80,   (20, 50),  step=1)
         ma_r = st.slider("Max Trade Age",         100,  2000, (400, 800), step=50)
     with sr2:
-        s2_r = st.slider("Trend SMA Period",      100,  300,  (150, 250), step=10)
-        s5_r = st.slider("Context SMA Period",    20,   100,  (40, 70),   step=5)
-        vs_r = st.slider("Vol Spike Multiplier",  1.0,  3.0,  (1.2, 2.0), step=0.1)
-        br_r = st.slider("Base Risk %",           0.5,  5.0,  (1.0, 3.5), step=0.25)
+        s2_r = st.slider("Trend SMA",             100,  300,  (150, 250), step=10)
+        s5_r = st.slider("Context SMA",           20,   100,  (40, 70),  step=5)
+        vs_r = st.slider("Vol Spike Mult",         1.0,  3.0,  (1.2, 2.0), step=0.1)
+        br_r = st.slider("Base Risk %",            0.5,  5.0,  (1.0, 3.5), step=0.25)
 
-    oc4, oc5, oc6 = st.columns(3)
+    oc4, oc5 = st.columns(2)
     with oc4: opt_start = st.date_input("Start", datetime(2005, 1, 1), key="os")
     with oc5: opt_end   = st.date_input("End",   datetime.today(),     key="oe")
-    with oc6: opt_cap   = st.number_input("Capital ($)", 1000, 10_000_000, 10000, step=1000, key="oc")
+    opt_cap = st.number_input("Capital ($)", 1000, 10_000_000, 10000, step=1000, key="oc")
 
     run_opt = st.button("🚀 Run Optimization")
 
     if run_opt:
-        opt_mode_map = {"S1: ATR Trailing": "atr", "S2: MTP Static": "mtp", "S3: 10-Bar Static": "10bar"}
+        opt_mode_map = {"S1: ATR Trailing":"atr","S2: MTP Static":"mtp","S3: 10-Bar Static":"10bar"}
         opt_mode     = opt_mode_map[opt_strategy]
 
-        opt_tickers = custom_opt if opt_universe == "Custom" else all_tickers
-        if not opt_tickers:
-            st.error("No tickers loaded — run from the main tab first to populate the universe."); st.stop()
+        if not data or not found:
+            st.error("No data loaded. Reload the page.")
+            st.stop()
+
+        # Filter data to the optimization date range
+        opt_data = {}
+        for c in ["Open","High","Low","Close","Volume"]:
+            if c in data:
+                filtered = data[c][str(opt_start):str(opt_end)]
+                if not filtered.empty:
+                    opt_data[c] = filtered
+        opt_found = [t for t in found if t in opt_data.get("Close", pd.DataFrame()).columns]
+
+        st.success(f"Using **{len(opt_found):,}** tickers already in memory. Starting {n_trials} trials…")
 
         score_map = {"Calmar":"_calmar","Sharpe":"_sharpe","CAGR":"_cagr","Profit Factor":"_pf"}
         sort_map  = {"Calmar":"Calmar","Sharpe":"Sharpe","CAGR":"CAGR%","Profit Factor":"Profit Factor"}
@@ -1229,25 +1033,12 @@ with main_tab2:
             "stop_review_bars": stop_review_bars,
         }
 
-        st.info(f"Loading {len(opt_tickers)} tickers for optimization…")
-        opt_prog = st.progress(0, text="Downloading data…")
-        opt_data, opt_found, _ = fetch_universe_parallel(
-            opt_tickers, str(opt_start), str(opt_end),
-            progress_callback=lambda pct, txt: opt_prog.progress(pct, text=txt),
-        )
-        opt_prog.empty()
-
-        if not opt_data:
-            st.error("No data loaded."); st.stop()
-
-        st.success(f"Loaded {len(opt_found)} tickers. Starting {n_trials} trials…")
-
         results = []; past = []; best_s = -np.inf; best_t = None
-        tbl     = st.empty()
-        prog    = st.progress(0, text="Starting…")
+        tbl  = st.empty()
+        prog = st.progress(0, text="Starting…")
 
-        for n in range(1, n_trials + 1):
-            prog.progress(n / n_trials, text=f"Trial {n}/{n_trials} | Best {opt_metric}: {best_s:.4f}")
+        for n in range(1, n_trials+1):
+            prog.progress(n/n_trials, text=f"Trial {n}/{n_trials} | Best {opt_metric}: {best_s:.4f}")
             tp  = suggest(space, past)
             fp  = {**tp, **fixed}
             tdf = run_backtest(opt_data, opt_found, fp, opt_cap, opt_mode)
@@ -1261,18 +1052,17 @@ with main_tab2:
                 m, _, _ = compute_metrics(tdf, opt_cap, opt_start, opt_end)
                 score   = float(m.get(skey, -999))
                 row     = {"trial": n, **{k: tp[k] for k in space},
-                           "CAGR%":         round(m["_cagr"] * 100, 2),
+                           "CAGR%":         round(m["_cagr"]*100, 2),
                            "Sharpe":        round(m["_sharpe"], 3),
                            "Calmar":        round(m["_calmar"], 3),
                            "Profit Factor": round(m["_pf"], 3),
-                           "Max DD%":       round(m["_maxdd"] * 100, 2),
-                           "Win Rate%":     float(m["Win Rate"].replace("%", "")),
+                           "Max DD%":       round(m["_maxdd"]*100, 2),
+                           "Win Rate%":     float(m["Win Rate"].replace("%","")),
                            "Trades":        m["Total Trades"]}
 
             past.append({"params": tp, "score": score})
             results.append(row)
-            if score > best_s:
-                best_s = score; best_t = row.copy()
+            if score > best_s: best_s = score; best_t = row.copy()
 
             if n % 3 == 0 or n == n_trials:
                 tbl.dataframe(pd.DataFrame(results).sort_values(scol, ascending=False),
