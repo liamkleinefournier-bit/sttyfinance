@@ -24,7 +24,7 @@ A professional backtesting tool for a 52-week breakout trend-following strategy 
 | Trend SMA | 200 period |
 | Context SMA | 70 period |
 | Volume Spike | 1.4x avg |
-| Base Risk | 2.75% per trade |
+| Base Risk | 2% per trade |
 
 ## How to Use
 
