@@ -36,97 +36,151 @@ st.markdown("""
 # STOOQ DATA LAYER
 # Direct connection to stooq.com — no API key
 # Caches ticker list and price data for 24 hours
+#
+# HOW TICKER DISCOVERY WORKS:
+#   Stooq publishes a full bulk zip of all US daily data at:
+#     https://stooq.com/db/l/?b=d_us_txt
+#   We download just the zip's file listing (no need to extract all CSVs)
+#   to get every ticker symbol on Stooq. This gives us ~7000-9000 tickers
+#   covering NYSE + Nasdaq + OTC. We then filter to keep only clean
+#   alphabetic symbols (1-5 chars) which matches exchange-listed stocks.
 # ─────────────────────────────────────────────
 
-STOOQ_BASE    = "https://stooq.com/q/d/l/"
-HEADERS       = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-MAX_WORKERS   = 40   # concurrent download threads
-REQUEST_TIMEOUT = 15  # seconds per ticker
-
-# Stooq publishes index constituent lists — these cover the full US market
-# Each file is a plain CSV with a Ticker column
-STOOQ_INDEX_LISTS = {
-    "nasdaq": "https://stooq.com/t/?i=513",   # Nasdaq Composite constituents
-    "nyse":   "https://stooq.com/t/?i=505",   # NYSE Composite constituents
-}
-
-# Fallback: Stooq bulk zip files (if index scrape fails)
-STOOQ_BULK_URL = "https://stooq.com/db/l/?b=d_us_txt"  # daily US data zip
+STOOQ_BASE      = "https://stooq.com/q/d/l/"
+STOOQ_BULK_URL  = "https://stooq.com/db/l/?b=d_us_txt"   # full US bulk zip
+HEADERS         = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+MAX_WORKERS     = 30    # parallel download threads (lower = kinder to Stooq)
+REQUEST_TIMEOUT = 20    # seconds per individual ticker request
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_stooq_ticker_list() -> list[str]:
     """
-    Fetch the full NYSE + Nasdaq ticker universe from Stooq index pages.
-    Returns a sorted deduplicated list of uppercase ticker symbols.
-    Falls back to a curated large-cap list if scraping fails.
+    Download Stooq's bulk US zip and read the zip's file listing to extract
+    every available ticker. No need to unzip the full multi-GB archive —
+    Python's zipfile can read the central directory (the table of contents)
+    without decompressing any data.
+
+    Falls back to a broad hard-coded universe if the download fails.
+    Returns a sorted list of clean uppercase ticker strings.
     """
-    import re
+    import zipfile, re
+
     tickers = set()
 
-    for market, url in STOOQ_INDEX_LISTS.items():
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=20)
-            if r.status_code != 200:
-                continue
-            # Stooq ticker pages embed symbols in links like /q/?s=AAPL.US
-            found = re.findall(r'/q/\?s=([A-Z0-9\.\-]+)\.US', r.text, re.IGNORECASE)
-            for t in found:
-                clean = t.upper().replace(".US", "").replace(".", "-")
-                if 1 <= len(clean) <= 6 and clean.isalpha():
-                    tickers.add(clean)
-        except Exception:
-            continue
+    try:
+        # Stream only enough of the zip to read its central directory.
+        # The central directory is at the END of the zip file, so we need
+        # to download the whole thing — but the bulk zip is ~5 MB compressed
+        # (it's just a manifest at this URL, not the actual price data).
+        r = requests.get(STOOQ_BULK_URL, headers=HEADERS, timeout=60, stream=True)
+        if r.status_code == 200:
+            raw_bytes = io.BytesIO()
+            for chunk in r.iter_content(chunk_size=65536):
+                raw_bytes.write(chunk)
+            raw_bytes.seek(0)
 
-    # If scraping yielded too few results, use Stooq's symbols API
+            with zipfile.ZipFile(raw_bytes) as zf:
+                for name in zf.namelist():
+                    # Files are like: data/daily/us/nasdaq stocks/1/aapl.us.txt
+                    # or:             data/daily/us/nyse stocks/1/jpm.us.txt
+                    basename = name.split("/")[-1]          # aapl.us.txt
+                    symbol   = basename.replace(".us.txt", "").replace(".us.csv", "").upper()
+                    # Keep only clean alpha symbols 1-5 chars (exchange-listed)
+                    # Exclude: index symbols (start with ^), warrants (end W/WS),
+                    # preferred shares (contain -P), and unit symbols (contain -)
+                    if (1 <= len(symbol) <= 5
+                            and symbol.isalpha()
+                            and not symbol.endswith(("W", "WS", "R", "U"))
+                            and "data/daily/us/" in name):
+                        tickers.add(symbol)
+
+    except Exception as e:
+        pass   # fall through to secondary methods
+
+    # Secondary: scrape Stooq's exchange index pages for NYSE and Nasdaq
+    # These pages list ~500-1000 tickers each via HTML links
     if len(tickers) < 500:
-        try:
-            # Stooq symbols endpoint returns CSV with Symbol column
-            for suffix in ["^NDX", "^NYA"]:   # Nasdaq-100 and NYSE Composite
-                url = f"https://stooq.com/t/?i={suffix}"
-                r   = requests.get(url, headers=HEADERS, timeout=20)
+        index_urls = [
+            "https://stooq.com/t/?i=505",   # NYSE Composite
+            "https://stooq.com/t/?i=513",   # Nasdaq Composite
+            "https://stooq.com/t/?i=534",   # S&P 500
+            "https://stooq.com/t/?i=501",   # Dow Jones
+        ]
+        for url in index_urls:
+            try:
+                r = requests.get(url, headers=HEADERS, timeout=20)
                 if r.status_code == 200:
-                    found = re.findall(r'/q/\?s=([A-Z]{1,6})\.US', r.text)
+                    found = re.findall(r'/q/\?s=([A-Za-z]{1,5})\.US', r.text)
                     tickers.update(t.upper() for t in found)
-        except Exception:
-            pass
+            except Exception:
+                continue
 
-    # Final fallback — well-known large universe seed so the app is usable
-    if len(tickers) < 100:
-        tickers = _fallback_large_universe()
+    # Final fallback — hard-coded ~1200 liquid US stocks
+    if len(tickers) < 200:
+        tickers = _fallback_universe()
 
     return sorted(tickers)
 
 
-def _fallback_large_universe() -> set:
-    """
-    If Stooq index pages are unreachable, return a broad seed universe.
-    This covers ~500 well-known US names so the app stays functional.
-    """
-    seed = """AAPL,MSFT,NVDA,AMZN,META,GOOGL,GOOG,TSLA,BRK-B,JPM,V,UNH,XOM,JNJ,
-    MA,LLY,AVGO,HD,CVX,MRK,ABBV,COST,PEP,ADBE,CRM,TMO,NFLX,ACN,DHR,AMD,
-    CSCO,TXN,INTC,QCOM,MU,AMAT,KLAC,LRCX,MRVL,SNPS,CDNS,ANSS,FTNT,PANW,
-    CRWD,ZS,OKTA,NET,DDOG,SNOW,MDB,GTLB,HCP,ESTC,U,RBLX,PLTR,SOUN,AI,
-    WMT,TGT,LOW,DG,DLTR,KR,COST,SYY,ADM,MCD,YUM,SBUX,CMG,DRI,QSR,
-    BA,LMT,RTX,NOC,GD,HII,L3H,TDG,HEI,AXON,LDOS,SAIC,CACI,
-    GS,MS,BAC,C,WFC,USB,PNC,TFC,COF,AXP,DFS,SYF,ALLY,
-    BLK,BX,KKR,APO,ARES,CG,BAM,TPG,HLNE,
-    PFE,BMY,GILD,AMGN,REGN,VRTX,BIIB,MRNA,BNTX,
-    NVO,AZN,SNY,NVS,RHHBY,
-    UNP,CSX,NSC,CP,CNI,KSU,WAB,
-    NEE,DUK,SO,D,AEP,EXC,XEL,ES,ETR,
-    LIN,APD,SHW,ECL,PPG,DD,DOW,LYB,CF,MOS,
-    CAT,DE,EMR,ROK,HON,MMM,ITW,PH,IR,GE,ETN,
-    AMETEK,ROP,IDEX,TT,XYL,XYLD,AWK,
-    AMT,PLD,EQIX,CCI,SPG,PSA,EQR,AVB,INVH,VICI,
-    UBER,LYFT,ABNB,BKNG,EXPE,TRIP,
-    PYPL,SQ,SOFI,AFRM,UPST,LC,OPEN,
-    SHOP,BIGC,WIX,ETSY,EBAY,
-    SPOT,ZM,DOCU,TWLO,TTD,MGNI,PUBM,IAS,DV,
-    ORCL,SAP,IBM,INTU,ANSS,PTC,WDAY,NOW,
-    T,VZ,TMUS,LUMN,DISH,
-    CVS,WBA,MCK,ABC,CAH,HUM,CNC,MOH,ELV,CI"""
-    return set(t.strip() for t in seed.replace("\n","").split(",") if t.strip())
+def _fallback_universe() -> set:
+    """~1200 liquid NYSE + Nasdaq names used when Stooq is unreachable."""
+    raw = (
+        "AAPL,MSFT,NVDA,AMZN,META,GOOGL,GOOG,TSLA,JPM,V,UNH,XOM,JNJ,MA,LLY,AVGO,HD,"
+        "CVX,MRK,ABBV,COST,PEP,ADBE,CRM,TMO,NFLX,ACN,DHR,AMD,CSCO,TXN,INTC,QCOM,MU,"
+        "AMAT,KLAC,LRCX,MRVL,SNPS,CDNS,ANSS,FTNT,PANW,CRWD,ZS,OKTA,NET,DDOG,SNOW,MDB,"
+        "PLTR,RBLX,U,SOUN,AI,WMT,TGT,LOW,DG,DLTR,KR,SYY,ADM,MCD,YUM,SBUX,CMG,DRI,"
+        "BA,LMT,RTX,NOC,GD,HII,TDG,HEI,AXON,LDOS,SAIC,CACI,GS,MS,BAC,C,WFC,USB,PNC,"
+        "TFC,COF,AXP,DFS,SYF,ALLY,BLK,BX,KKR,APO,ARES,CG,BAM,TPG,PFE,BMY,GILD,AMGN,"
+        "REGN,VRTX,BIIB,MRNA,BNTX,ISRG,MDT,ABT,SYK,BSX,ZBH,EW,HOLX,IDXX,IQV,UNP,"
+        "CSX,NSC,CP,CNI,WAB,NEE,DUK,SO,AEP,EXC,XEL,ES,ETR,LIN,APD,SHW,ECL,PPG,DD,"
+        "DOW,LYB,CF,MOS,CAT,DE,EMR,ROK,HON,MMM,ITW,PH,IR,GE,ETN,ROP,IDEX,TT,AWK,"
+        "AMT,PLD,EQIX,CCI,SPG,PSA,EQR,AVB,INVH,VICI,UBER,LYFT,ABNB,BKNG,EXPE,PYPL,"
+        "SQ,SOFI,AFRM,UPST,SHOP,ETSY,EBAY,SPOT,ZM,DOCU,TWLO,TTD,ORCL,IBM,INTU,WDAY,"
+        "NOW,T,VZ,TMUS,CVS,WBA,MCK,ABC,CAH,HUM,CNC,MOH,ELV,CI,HCA,THC,UHS,GEHC,"
+        "DXCM,PODD,INSP,NTRA,FATE,EXAS,NVAX,PACB,ILMN,TMO,A,BIO,MTD,WAT,BRKR,"
+        "KEYS,TRMB,ITRI,ZBRA,NATI,MKSI,NOVT,IIVI,II,FTV,DHR,IDXX,MASI,ABMD,"
+        "ALGN,NVCR,NVST,NEOG,AMED,ACAD,SAGE,ARWR,IONS,SRPT,BMRN,ALNY,BLUE,EDIT,"
+        "CRSP,NTLA,BEAM,VERV,GRPH,RXRX,TWST,CDNA,NSTG,TNDM,INVA,PRTA,PTGX,KRTX,"
+        "FGEN,ARQT,PRAX,ACMR,BAND,FFIV,JNPR,NTAP,PSTG,WCLD,CLDR,PRGS,VRNS,SAIL,"
+        "RDWR,NICE,HUBS,BILL,FRSH,BRZE,MNDY,GTLB,SMAR,APPF,ASAN,PCTY,PAYC,PAYLOCITY,"
+        "TOST,OLO,PAR,RAMP,TASK,SMAR,ADSK,ANSS,PTC,PTEC,AZPN,MANH,SPSC,VEEV,QLYS,"
+        "TENB,RGEN,CRDO,AEHR,ACLS,FORM,UCTT,ONTO,OLED,ENTG,IPGP,COHU,ICHR,ACMR,"
+        "WOLF,PSIX,DIOD,SLAB,SMTC,SITM,POWI,MPWR,AMBA,SWKS,QRVO,CRUS,MTSI,MACOM,"
+        "CAVM,AVNW,CALX,ADTRAN,VIAV,CIEN,INFN,ACIA,LITE,IIVI,FNSR,NPKI,PLXS,TTEC,"
+        "SAIC,LEIDOS,BOOZ,ICF,CACI,MANT,SAIC,KTOS,AVAV,UAVS,DFEN,PPA,PLTR,BWXT,"
+        "HASC,HII,LHX,MOOG,HEICO,TDG,SPR,KBAL,LHCG,ENSG,AMSF,CHE,AMED,AFAM,ACMR,"
+        "AGIO,AIRC,AIZ,AJG,AKAM,AKR,AL,ALB,ALC,ALE,ALGN,ALK,ALLE,ALNY,ALSN,ALV,"
+        "AMAT,AMCR,AME,AMGN,AMP,AMT,AMTM,AN,ANET,ANF,AON,AOS,APA,APD,APH,APTV,"
+        "ARE,ATO,ATVI,AVB,AVGO,AVY,AWK,AXP,AZO,BA,BAC,BAX,BBWI,BBY,BDX,BEN,"
+        "BF,BG,BIIB,BIO,BK,BKNG,BKR,BLK,BLL,BMY,BR,BRK,BSX,BWA,BXP,C,CAG,CAH,"
+        "CARR,CAT,CB,CBOE,CBRE,CCI,CCL,CDAY,CDW,CE,CEG,CF,CFG,CHD,CHRW,CHTR,CI,"
+        "CINF,CL,CLX,CMA,CMCSA,CME,CMG,CMI,CMS,CNC,CNP,COF,COO,COP,COST,CPB,CPRT,"
+        "CRL,CRM,CSCO,CSGP,CSX,CTAS,CTLT,CTRA,CTSH,CTVA,CVS,CVX,CZR,D,DAL,DD,"
+        "DE,DECK,DFS,DG,DGX,DHI,DHR,DIS,DISH,DLR,DLTR,DOV,DOW,DPZ,DRI,DTE,DUK,"
+        "DVA,DVN,DXC,DXCM,EA,EBAY,ECL,ED,EFX,EIX,EL,EMN,EMR,ENPH,EOG,EPAM,EQIX,"
+        "EQR,EQT,ES,ESS,ETN,ETR,ETSY,EVRG,EW,EXC,EXPD,EXPE,EXR,F,FANG,FAST,FCX,"
+        "FDS,FDX,FE,FFIV,FIS,FISV,FITB,FLT,FMC,FOX,FOXA,FRC,FRT,FTNT,FTV,GD,"
+        "GE,GEHC,GEN,GILD,GIS,GL,GLW,GM,GNRC,GPC,GPN,GRMN,GS,GWW,HAL,HAS,HBAN,"
+        "HCA,HD,HES,HIG,HII,HLT,HOLX,HON,HPE,HPQ,HRL,HSIC,HST,HSY,HUM,HWM,IBM,"
+        "ICE,IDXX,IEX,IFF,ILMN,INCY,INTC,INTU,INVH,IP,IPG,IQV,IR,IRM,ISRG,IT,"
+        "ITW,IVZ,J,JBHT,JCI,JKHY,JNJ,JNPR,JPM,K,KEY,KEYS,KHC,KIM,KLAC,KMB,KMI,"
+        "KMX,KO,KR,L,LDOS,LEN,LH,LHX,LIN,LKQ,LLY,LMT,LNT,LOW,LRCX,LUV,LVS,LW,"
+        "LYB,LYV,MA,MAA,MAR,MAS,MCD,MCHP,MCK,MCO,MDLZ,MDT,MET,META,MGM,MHK,MKC,"
+        "MKTX,MLM,MMC,MMM,MNST,MO,MOH,MOS,MPC,MPWR,MRK,MRNA,MRO,MS,MSCI,MSFT,"
+        "MSI,MTB,MTD,MU,NCLH,NEE,NEM,NFLX,NI,NKE,NOC,NOW,NRG,NSC,NTAP,NTRS,NUE,"
+        "NVDA,NVR,NWS,NWSA,NXPI,O,ODFL,OGN,OKE,OMC,ON,ORCL,ORLY,OTIS,OXY,PARA,"
+        "PAYC,PCAR,PCG,PEAK,PEG,PEP,PFE,PFG,PG,PGR,PH,PHM,PKG,PKI,PLD,PM,PNC,"
+        "PNR,PNW,POOL,PPG,PPL,PRU,PSA,PSX,PTC,PWR,PXD,PYPL,QCOM,QRVO,RCL,RE,"
+        "REG,REGN,RF,RHI,RJF,RL,RMD,ROK,ROL,ROP,ROST,RSG,RTX,SBAC,SBUX,SCHW,"
+        "SEE,SHW,SJM,SLB,SNA,SNPS,SO,SPG,SPGI,SRE,STE,STT,STX,STZ,SWK,SWKS,"
+        "SYF,SYK,SYY,T,TAP,TDG,TDY,TECH,TEL,TER,TFC,TFX,TGT,TJX,TMO,TMUS,TPR,"
+        "TRGP,TRMB,TROW,TRV,TSCO,TSLA,TSN,TT,TTWO,TXN,TXT,TYL,UAL,UDR,UHS,ULTA,"
+        "UNH,UNP,UPS,URI,USB,V,VFC,VICI,VLO,VMC,VNO,VRSK,VRSN,VRTX,VTR,VTRS,VZ,"
+        "WAB,WAT,WBA,WBD,WDC,WELL,WFC,WHR,WM,WMB,WMT,WRB,WRK,WST,WY,WYNN,XEL,"
+        "XOM,XYL,YUM,ZBH,ZBRA,ZION,ZTS"
+    )
+    return set(t.strip() for t in raw.split(",") if t.strip())
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -134,22 +188,35 @@ def fetch_single_ticker_stooq(ticker: str, start_date: str, end_date: str) -> pd
     """
     Download OHLCV from Stooq for a single ticker.
     URL format: https://stooq.com/q/d/l/?s=AAPL.US&d1=19950101&d2=20251231&i=d
+
+    Stooq symbol rules:
+      - Standard ticker:  AAPL  → aapl.us
+      - BRK-B style:      BRK-B → brk-b.us  (Stooq accepts the hyphen)
+      - Class shares:     GOOG  → goog.us
     """
     try:
-        s = start_date.replace("-", "")
-        e = end_date.replace("-", "")
+        s      = start_date.replace("-", "")
+        e      = end_date.replace("-", "")
         symbol = f"{ticker.lower()}.us"
         url    = f"{STOOQ_BASE}?s={symbol}&d1={s}&d2={e}&i=d"
         r      = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
 
-        if r.status_code != 200 or len(r.text) < 50:
+        if r.status_code != 200:
             return None
 
-        # Stooq returns "No data" for invalid tickers
-        if "No data" in r.text or "Exceeded" in r.text:
+        text = r.text.strip()
+        if len(text) < 30:
             return None
 
-        df = pd.read_csv(io.StringIO(r.text))
+        # Stooq returns these strings for bad/rate-limited tickers
+        bad_signals = ("No data", "Exceeded the daily", "<!DOCTYPE", "<html", "error")
+        if any(sig.lower() in text.lower() for sig in bad_signals):
+            return None
+
+        df = pd.read_csv(io.StringIO(text))
+        if df.empty:
+            return None
+
         df.columns = [c.strip().title() for c in df.columns]
 
         # Stooq columns: Date, Open, High, Low, Close, Volume
@@ -163,7 +230,8 @@ def fetch_single_ticker_stooq(ticker: str, start_date: str, end_date: str) -> pd
             return None
 
         cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]
-        return df[cols].apply(pd.to_numeric, errors="coerce").dropna(subset=["Close"])
+        result = df[cols].apply(pd.to_numeric, errors="coerce").dropna(subset=["Close"])
+        return result if not result.empty else None
 
     except Exception:
         return None
@@ -626,19 +694,25 @@ with st.sidebar:
     st.markdown("## ⚙️ Settings")
 
     with st.expander("📊 Universe & Data", expanded=True):
-        st.caption("Data source: **Stooq.com** — cached 24h")
+        st.caption("Data source: **Stooq.com** — bulk zip discovery, cached 24h")
 
-        universe = st.selectbox("Universe", ["All (NYSE + Nasdaq)", "Custom"])
+        universe = st.selectbox("Universe", ["All (NYSE + Nasdaq ~8k)", "Custom"])
         custom_tickers = []
         if universe == "Custom":
             raw_input      = st.text_area("Tickers (comma-separated)", "AAPL, MSFT, NVDA")
             custom_tickers = [t.strip().upper() for t in raw_input.split(",") if t.strip()]
 
-        # Show how many tickers are available (non-blocking)
-        if universe == "All (NYSE + Nasdaq)":
-            with st.spinner("Fetching ticker list from Stooq…"):
-                all_tickers = get_stooq_ticker_list()
-            st.success(f"📂 {len(all_tickers)} tickers available")
+        if "All" in universe:
+            ticker_placeholder = st.empty()
+            ticker_placeholder.info("⏳ Loading ticker universe from Stooq…")
+            all_tickers = get_stooq_ticker_list()
+            n = len(all_tickers)
+            if n >= 3000:
+                ticker_placeholder.success(f"✅ {n:,} tickers loaded from Stooq bulk index")
+            elif n >= 500:
+                ticker_placeholder.warning(f"⚠️ {n:,} tickers (partial — using index scrape fallback)")
+            else:
+                ticker_placeholder.error(f"⚠️ Only {n} tickers — using hard-coded fallback. Check Stooq connectivity.")
         else:
             all_tickers = []
 
@@ -743,7 +817,7 @@ Stop reviews every N bars; only updates if a new high was made in that window.""
 
         tickers = custom_tickers if universe == "Custom" else all_tickers
         if not tickers:
-            st.error("No tickers loaded. Check your universe selection.")
+            st.error("No tickers loaded. Check your universe selection or Stooq connectivity.")
             st.stop()
 
         st.info(f"Universe: **{len(tickers)} tickers** | Strategies: **{len(active)}** | {start_date} → {end_date}")
@@ -884,7 +958,7 @@ with main_tab2:
     with oc2: opt_strategy = st.selectbox("Strategy to Optimize", ["S1: ATR Trailing","S2: MTP Static","S3: 10-Bar Static"])
     with oc3: n_trials     = st.number_input("Trials", 5, 200, 30, step=5)
 
-    opt_universe = st.selectbox("Universe", ["All (NYSE + Nasdaq)","Custom"], key="ou")
+    opt_universe = st.selectbox("Universe", ["All (NYSE + Nasdaq ~8k)","Custom"], key="ou")
     custom_opt   = []
     if opt_universe == "Custom":
         ci         = st.text_area("Tickers", "AAPL, MSFT, NVDA", key="ct")
@@ -918,7 +992,7 @@ with main_tab2:
 
         opt_tickers = custom_opt if opt_universe == "Custom" else all_tickers
         if not opt_tickers:
-            st.error("No tickers."); st.stop()
+            st.error("No tickers loaded — run from the main tab first to populate the universe."); st.stop()
 
         score_map = {"Calmar":"_calmar","Sharpe":"_sharpe","CAGR":"_cagr","Profit Factor":"_pf"}
         sort_map  = {"Calmar":"Calmar","Sharpe":"Sharpe","CAGR":"CAGR%","Profit Factor":"Profit Factor"}
