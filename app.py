@@ -804,8 +804,11 @@ Stop reviews every N bars. Only updates if new high made in that window. Most st
 
         st.info(f"Universe: **{len(tickers)} tickers** | Strategies: **{len(active)}** | {start_date} → {end_date}")
 
-        with st.spinner(f"Downloading data for {len(tickers)} tickers from Yahoo Finance…"):
-            data = fetch_data(tuple(tickers), str(start_date), str(end_date))
+        cache_key = f"data_{'-'.join(sorted(tickers)[:5])}_{start_date}_{end_date}"
+        if cache_key not in st.session_state:
+            with st.spinner(f"Downloading data for {len(tickers)} tickers from Yahoo Finance…"):
+                st.session_state[cache_key] = fetch_data(tuple(tickers), str(start_date), str(end_date))
+        data = st.session_state[cache_key]
 
         if not data:
             st.error("No data returned from Yahoo Finance.")
@@ -1005,8 +1008,13 @@ with tab2:
             "use_regime": use_regime,
         }
 
-        with st.spinner(f"Downloading {len(opt_tickers)} tickers…"):
-            opt_data = fetch_data(tuple(opt_tickers), str(opt_start), str(opt_end))
+        opt_cache_key = f"data_{'-'.join(sorted(opt_tickers)[:5])}_{opt_start}_{opt_end}"
+        if opt_cache_key not in st.session_state:
+            with st.spinner(f"Downloading {len(opt_tickers)} tickers… (cached after first run)"):
+                st.session_state[opt_cache_key] = fetch_data(tuple(opt_tickers), str(opt_start), str(opt_end))
+        else:
+            st.success("Using cached data — no re-download needed.")
+        opt_data = st.session_state[opt_cache_key]
 
         if not opt_data:
             st.error("No data."); st.stop()
